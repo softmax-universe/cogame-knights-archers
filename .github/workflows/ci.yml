@@ -1,4 +1,4 @@
-# CI for a Coworld game repo (Metta-AI/cogame-knights-archers).
+# CI for a Coworld game repo (softmax-universe/cogame-knights-archers).
 #
 # Goes to:  .github/workflows/ci.yml  in the coworld repo.
 # Substitute: knights-archers  (lowercase game slug, e.g. bullwhip)
