@@ -243,7 +243,7 @@ manifest = {
             "run": ["/bin/knights-archers"],
             "env": {},
             "source_url":
-                "https://github.com/Metta-AI/cogame-knights-archers/tree/main",
+                "https://github.com/softmax-universe/cogame-knights-archers/tree/main",
         },
         "config_schema": {
             "$schema": "http://json-schema.org/draft-07/schema#",
@@ -286,7 +286,7 @@ manifest = {
         "run": ["/bin/knights-archers-player"],
         "env": {"PLAYER_SCRIPTED": "phalanx"},
         "source_url":
-            "https://github.com/Metta-AI/cogame-knights-archers/tree/main",
+            "https://github.com/softmax-universe/cogame-knights-archers/tree/main",
         "resources": {
             "requests": {"cpu": "100m", "memory": "64Mi"},
             "limits": {"cpu": "1"},
