@@ -29,8 +29,8 @@ const
 proc episodeConfig(seed: int): GameConfig =
   var node = %*{
     "num_agents": 4, "minPlayers": 4, "maxTicks": 2304, "maxGames": 2,
-    "turnTicks": 96, "turnBudgetMs": 7000, "attempt1Ms": 4500,
-    "retryMs": 2000, "turnSpacingMs": 0, "wallClockBudgetSeconds": 690,
+    "turnTicks": 96, "turnBudgetMs": 7000,
+    "turnSpacingMs": 0, "wallClockBudgetSeconds": 690,
     "lobbyJoinTimeoutTicks": 1440, "startWaitTicks": 0, "gameOverTicks": 24,
     "mapPath": "arena", "fogOfWar": false, "fastMode": true,
     "showPlayerLabels": false, "lives": 1, "hitPoints": 1, "seed": seed,

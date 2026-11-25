@@ -114,8 +114,10 @@ block missingActionsHaveOneSharedDeadlineAndNoFallback:
     check(requests.len == 4, "attempt sends all four views together")
     newSeq[string](requests.len)
   let records = engine.turn(world, 0, 24, 0, exchange)
-  check(deadlines == @[world.config.attempt1Ms],
-    "single batch deadline preserves exact millisecond budget")
+  check(deadlines.len == 1 and deadlines[0] > 0 and
+        deadlines[0] <= world.config.turnBudgetMs and
+        deadlines[0] >= world.config.turnBudgetMs - 100,
+    "single batch deadline is bounded by remaining turnBudgetMs")
   check(engine.failed and engine.failureKind == FailureKindInfra and engine.failureCause == "timeout",
     "timeout is recorded as infrastructure failure")
   for seat in 0 ..< world.seatCount():
@@ -212,8 +214,9 @@ block theShippedVariantsPaceThemselvesInsideTheBudget:
     let perMinute = seats * 60_000 div max(1, spacing)
     check(perMinute <= 30, id & ": too many model calls per minute")
     check(spacing > budget, id & ": spacing must exceed the turn budget")
-    check(cfg["attempt1Ms"].getInt() + cfg["retryMs"].getInt() <= budget,
-      id & ": both deadlines must fit inside one turn budget")
+    check(not cfg.hasKey("attempt1Ms") and not cfg.hasKey("retryMs"),
+      id & ": stale attempt/retry fields must not be present")
+    check(budget >= 1000, id & ": turnBudgetMs must be at least 1000 ms")
     let turns = max(1, cfg["maxTicks"].getInt() div
       cfg["turnTicks"].getInt()) * max(1, cfg["maxGames"].getInt())
     let worst = turns * spacing div 1000 +

@@ -6,7 +6,7 @@ def text(path):
 
 CONST = dict(
     seed=679961, maxTicks=2304, maxGames=2, turnTicks=96,
-    turnBudgetMs=7000, attempt1Ms=4500, retryMs=2000, turnSpacingMs=9000,
+    turnBudgetMs=7000, turnSpacingMs=9000,
     wallClockBudgetSeconds=690, lobbyJoinTimeoutTicks=2400,
     startWaitTicks=120, gameOverTicks=72,
     zombieHp=2, zombieSpeed=384, zombieReach=26, zombieLungePx=90,
@@ -87,9 +87,8 @@ config_props = {
     "maxTicks": intprop(2304, 240, 7200, "Ticks in one wave (2304 = 96 s at 24 Hz)."),
     "maxGames": intprop(2, 1, 4, "Waves per episode."),
     "turnTicks": intprop(96, 1, 2304, "Sim ticks per decision turn."),
-    "turnBudgetMs": intprop(7000, 1000, 60000),
-    "attempt1Ms": intprop(4500, 1000, 60000),
-    "retryMs": intprop(2000, 1000, 60000),
+    "turnBudgetMs": intprop(7000, 1000, 60000,
+        "Per-turn decision deadline in milliseconds."),
     "turnSpacingMs": intprop(9000, 0, 60000,
         "Wall-clock floor between batch STARTS; holds four seats under the "
         "configured 30 req/min per-episode model budget."),
@@ -207,8 +206,6 @@ cert_config = {
     "maxGames": 2,
     "turnTicks": 96,
     "turnBudgetMs": 15000,
-    "attempt1Ms": 15000,
-    "retryMs": 2000,
     "turnSpacingMs": 0,
     "wallClockBudgetSeconds": 240,
     "lobbyJoinTimeoutTicks": 1440,

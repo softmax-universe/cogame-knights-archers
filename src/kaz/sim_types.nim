@@ -782,17 +782,7 @@ const
                                 ## touches tag a 3 hp cog out, which is what
                                 ## makes the heal half of the buff matter.
   DefaultTurnTicks* = 108       ## 4.5 s of sim time per decision turn.
-  ## v1.1 timing amendment (2026-08-25). The 0.1.2 deadlines were 4500/2000 ms
-  ## inside a 7000 ms cap, and curly's timeout is CURLOPT_TIMEOUT — whole
-  ## seconds — so attempt 1 really ran with 4 s. Paintball's own sidecar
-  ## measured a 4618 ms median over 85 hosted calls (56 of them past 4 s) and
-  ## every successful LLM directive reported a 3999–4001 ms latency: the
-  ## deadline, not the model, was answering. All three values are now whole
-  ## seconds so the configured number IS the effective one, and attempt 1
-  ## clears that median by ~1.4 s.
-  DefaultTurnBudgetMs* = 10_000 ## hard monotonic cap around one whole turn.
-  DefaultAttempt1Ms* = 6000     ## first parallel batch deadline (6 s exactly).
-  DefaultRetryMs* = 3000        ## single retry batch deadline (6 + 3 <= 10).
+  DefaultTurnBudgetMs* = 10_000 ## hard monotonic per-turn decision deadline (ms).
   DefaultTurnSpacingMs* = 5000  ## wall-clock floor between batch STARTS; holds
                                 ## 2 seats under the sidecar's 30 req/min cap.
   DefaultWallClockBudgetSeconds* = 690
@@ -1556,9 +1546,7 @@ type
     sprayDamage*: int             ## hp removed by one cone touch.
     regimes*: seq[Regime]         ## regime per game index (resident/visitor).
     turnTicks*: int               ## sim ticks per decision turn.
-    turnBudgetMs*: int            ## monotonic cap on one whole turn.
-    attempt1Ms*: int              ## first batch deadline.
-    retryMs*: int                 ## retry batch deadline.
+    turnBudgetMs*: int            ## monotonic cap / decision deadline on one whole turn.
     turnSpacingMs*: int           ## wall-clock floor between batch starts.
     wallClockBudgetSeconds*: int  ## engine hard stop -> reason "deadline".
     model*: string                ## pinned Bedrock/Anthropic model, "" = auto.

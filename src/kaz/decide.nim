@@ -9,7 +9,7 @@
 ## at most 4 x 48 = 192 player decisions, at most 4 in flight.
 ##
 ## DEGRADE, NEVER HANG. Every wait here is bounded: each model decision gets
-## one parallel attempt within `min(turnBudgetMs, attempt1Ms)`. A provider
+## one parallel attempt within `turnBudgetMs`. A provider
 ## throttle, credential-free player, timeout, transport error, or invalid/
 ## unparseable directive records the failure cause immediately without
 ## substituting a scripted or idle move; the host terminates the interrupted
@@ -456,8 +456,7 @@ proc turn*(
         engine.decisions[seat].status = asMissing
         engine.recordFailure(seat, "timeout", detail)
     else:
-      let remainingMs = (budget - (getMonoTime() - turnStart)).inMilliseconds.int
-      let deadlineMs = min(remainingMs, sim.config.attempt1Ms)
+      let deadlineMs = max(1, (budget - (getMonoTime() - turnStart)).inMilliseconds.int)
       var requests: seq[JsonNode]
       for seat in open:
         requests.add(%*{

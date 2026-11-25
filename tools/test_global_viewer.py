@@ -61,11 +61,11 @@ for flow in ['mixed-no-credentials','during-http','terminal-grace','within-deadl
  output=root/flow;output.mkdir(mode=0o700)
  with socket.socket() as reserve:
   reserve.bind(('127.0.0.1',0));port=reserve.getsockname()[1]
- config={'num_agents':4,'seed':7,'tokens':['t0','t1','t2','t3'],'players':[{'name':str(n)} for n in range(4)],'minPlayers':4,'maxTicks':24,'maxGames':1,'turnTicks':96,'turnBudgetMs':24000,'attempt1Ms':23000,'retryMs':1000,'startWaitTicks':0,'fastMode':True,'wallClockBudgetSeconds':90,'gameOverTicks':0}
+ config={'num_agents':4,'seed':7,'tokens':['t0','t1','t2','t3'],'players':[{'name':str(n)} for n in range(4)],'minPlayers':4,'maxTicks':24,'maxGames':1,'turnTicks':96,'turnBudgetMs':24000,'startWaitTicks':0,'fastMode':True,'wallClockBudgetSeconds':90,'gameOverTicks':0}
  (output/'config.json').write_text(json.dumps(config))
  env={**os.environ,'COGAME_HOST':'127.0.0.1','COGAME_PORT':str(port),'COGAME_CONFIG_URI':(output/'config.json').as_uri(),'COGAME_RESULTS_URI':(output/'results.json').as_uri(),'COGAME_PLAYER_FAILURE_URI':(output/'player_failure.json').as_uri(),'COGAME_SAVE_REPLAY_URI':(output/'replay.bitreplay').as_uri()}
  if flow in ['within-deadline','after-deadline']:
-  config.update(turnBudgetMs=7000,attempt1Ms=4500,retryMs=2000)
+  config.update(turnBudgetMs=4500)
   (output/'config.json').write_text(json.dumps(config))
   env.update(COGAME_SAVE_TRAJECTORY_URI=(output/'trajectory.jsonl').as_uri(),COWORLD_EPISODE_ID=str(uuid.uuid4()),COWORLD_GAME_VERSION='fixture-package-0.1.4',COWORLD_SOURCE_REVISION=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip())
  processes=[];logs=[]

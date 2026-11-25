@@ -49,7 +49,7 @@ exchanges private JSON decision frames with the game:
 
    ```json
    {"type":"decision","protocol":"kaz.player.v2","id":100000,
-    "slot":0,"attempt":1,"timeout_ms":4500,"view":{...}}
+    "slot":0,"attempt":1,"timeout_ms":7000,"view":{...}}
    ```
 
    The `view` is the existing private `seatViewJson`: own hero, visible horde,

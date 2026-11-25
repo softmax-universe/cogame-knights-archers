@@ -211,13 +211,25 @@ block theCertFixtureFitsTheCertifyTimeout:
   ## a handful of wall seconds.
   check(cfg["maxTicks"].getInt() * cfg["maxGames"].getInt() >= 24 * 30,
     "the fixture must outlast a 30 s viewer soak")
-  check(cfg["attempt1Ms"].getInt() >= 10000 and
-        cfg["turnBudgetMs"].getInt() >= cfg["attempt1Ms"].getInt(),
+  check(not cfg.hasKey("attempt1Ms") and not cfg.hasKey("retryMs"),
+    "the certification fixture must not carry stale attempt/retry fields")
+  check(cfg["turnBudgetMs"].getInt() >= 10000,
     "the certification fixture must give real model inference a reasonable timeout")
   check(cfg["turnSpacingMs"].getInt() == 0,
     "the certification fixture pays no extra turn spacing")
   check(cfg["wallClockBudgetSeconds"].getInt() <= 300,
     "the fixture must settle well inside the certify timeout")
+  ## Verify the real config parser/validator accepts every variant and the
+  ## certification fixture after runner token injection.
+  for variant in manifest["variants"]:
+    var vcfg = copy(variant["game_config"])
+    vcfg["tokens"] = %*["t0", "t1", "t2", "t3"]
+    var parsed = defaultGameConfig()
+    parsed.update($vcfg)
+  var ccfg = copy(cfg)
+  ccfg["tokens"] = %*["t0", "t1", "t2", "t3"]
+  var parsedCert = defaultGameConfig()
+  parsedCert.update($ccfg)
 
 block theScaffoldIsPresentAndExecutable:
   for path in ["tools/ci/docker_smoke.sh", "tools/build_replay_viewer.sh"]:
