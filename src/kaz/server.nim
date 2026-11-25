@@ -1280,20 +1280,18 @@ proc buildRewardPacket(sim: SimServer): string {.measure.} =
       result.addStatLine("captures", identity, account.captures)
 
 proc declarePlayerFailure(
-  slot: int, message: string, cause = "", failureKind = ""
+  slot: int, message: string, kind = PlayerFailureKindError
 ) =
   ## Publishes the game-declared terminal player failure the platform runner
-  ## polls for (COGAME_PLAYER_FAILURE_URI -> player_failure.json), so a lobby
-  ## no-show or failed model decision is charged to the seat that caused it
-  ## instead of poisoning the whole episode unattributed. Best-effort: the
-  ## abort that follows must never be masked by a declaration write failure,
-  ## and outside the platform (env unset) this is a no-op.
+  ## polls for (COGAME_PLAYER_FAILURE_URI -> player_failure.json) using
+  ## Coworld's closed GamePlayerFailure schema (`failed_policy_index`,
+  ## `message`, `kind`), so a lobby no-show or failed model decision is
+  ## charged to the seat that caused it instead of poisoning the whole episode
+  ## unattributed. Best-effort: the abort that follows must never be masked by
+  ## a declaration write failure, and outside the platform (env unset) this is
+  ## a no-op.
   try:
-    var payload = %*{"failed_policy_index": slot, "message": message}
-    if cause.len > 0:
-      payload["cause"] = %cause
-    if failureKind.len > 0:
-      payload["failure_kind"] = %failureKind
+    let payload = playerFailurePayload(slot, message, kind)
     writeCogameEnv(
       "COGAME_PLAYER_FAILURE_URI",
       $payload,
@@ -1727,8 +1725,7 @@ proc runServerLoop*(
           let detail = "player slot " & $stuckSlot & " never joined the lobby within " &
             $sim.config.lobbyJoinTimeoutTicks & " lobby ticks (~" &
             $(sim.config.lobbyJoinTimeoutTicks div TargetFps) & "s)"
-          declarePlayerFailure(stuckSlot, detail, cause = "no_show",
-            failureKind = FailureKindInfra)
+          declarePlayerFailure(stuckSlot, detail, kind = PlayerFailureKindError)
           abortedUnscored = true
           abortedSeat = stuckSlot
           abortedCause = "no_show"
@@ -2138,8 +2135,7 @@ proc runServerLoop*(
           declarePlayerFailure(
             engine.failedSeat,
             engine.failureKind & ":" & engine.failureCause & ": " & engine.failureDetail,
-            cause = engine.failureCause,
-            failureKind = engine.failureKind
+            kind = playerFailureKindFor(engine.failureKind)
           )
           abortedUnscored = true
           abortedSeat = engine.failedSeat

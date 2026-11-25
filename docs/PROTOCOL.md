@@ -12,7 +12,7 @@ The game container reads the standard `COGAME_*` environment:
 | `COGAME_CONFIG_URI` | the episode's game config JSON |
 | `COGAME_RESULTS_URI` | where the results document is written |
 | `COGAME_SAVE_REPLAY_URI` | where the `.replay` bytes are written |
-| `COGAME_PLAYER_FAILURE_URI` | where a no-show seat is reported |
+| `COGAME_PLAYER_FAILURE_URI` | where a terminal player failure (`GamePlayerFailure`: `failed_policy_index`, `message`, `kind`) is reported |
 | `COGAME_EVENTS_URI` | the tier-2 JSON-lines analysis stream |
 | `COGAME_METRICS_URI` | per-episode metrics |
 | `COGAME_HOST` / `COGAME_PORT` | the listener |
@@ -70,9 +70,11 @@ exchanges private JSON decision frames with the game:
    `cause:"no_credentials"`. The game validates directives strictly with one
    attempt per model decision, then compiles accepted directives to actuator
    masks. Any missing, timed-out, infrastructure-failed, or invalid model reply
-   records a `fallback` diagnostic and `COGAME_PLAYER_FAILURE_URI` cause, and
-   terminates the interrupted episode unscored (no `COGAME_RESULTS_URI` score
-   document is written and no scripted or idle move is substituted). The replay
+   records a `fallback` diagnostic and `COGAME_PLAYER_FAILURE_URI`
+   (`kind: "player_error"` for invalid replies, `"episode_inconclusive"` for
+   provider/infrastructure interruptions), and terminates the interrupted
+   episode unscored (no `COGAME_RESULTS_URI` score document is written and no
+   scripted or idle move is substituted). The replay
    records the accepted directives, masks, and failure diagnostic, never a
    model request or secret.
 

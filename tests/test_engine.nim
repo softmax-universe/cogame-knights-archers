@@ -351,4 +351,46 @@ block anUnregisteredSeatStillPlaysPhalanx:
     check(engine.directives[seat].source == dsScripted,
       "unregistered seat plays the published default")
 
+block playerFailurePayloadMatchesClosedSchema:
+  check(playerFailureKindFor(FailureKindInvalidAction) == PlayerFailureKindError,
+    "invalid_action maps to player_error")
+  check(playerFailureKindFor(FailureKindInfra) == PlayerFailureKindInconclusive,
+    "infrastructure maps to episode_inconclusive")
+  let errPayload = playerFailurePayload(
+    2, "invalid_action:parse_error: response must be a single JSON object",
+    PlayerFailureKindError)
+  check(errPayload.len == 3 and
+        errPayload.hasKey("failed_policy_index") and
+        errPayload.hasKey("message") and
+        errPayload.hasKey("kind") and
+        not errPayload.hasKey("cause") and
+        not errPayload.hasKey("failure_kind"),
+    "GamePlayerFailure payload must contain only closed schema keys")
+  check(errPayload["failed_policy_index"].getInt() == 2 and
+        errPayload["kind"].getStr() == "player_error",
+    "invalid reply attributes player_error to actual seat")
+  let infraPayload = playerFailurePayload(
+    3, "infrastructure:transport_error: HTTP 503",
+    PlayerFailureKindInconclusive)
+  check(infraPayload.len == 3 and
+        infraPayload["failed_policy_index"].getInt() == 3 and
+        infraPayload["kind"].getStr() == "episode_inconclusive",
+    "provider outage attributes episode_inconclusive to actual seat")
+  let emptyPayload = playerFailurePayload(1, "", PlayerFailureKindError)
+  check(emptyPayload["message"].getStr().len >= 1,
+    "empty message falls back to non-empty string")
+  var longMsg = ""
+  for _ in 0 ..< 1999:
+    longMsg.add('a')
+  longMsg.add("🛡x")
+  let bounded = playerFailurePayload(0, longMsg, PlayerFailureKindError)["message"].getStr()
+  check(bounded.len == 1999 + "🛡".len and bounded[^1] != 'x',
+    "message truncates cleanly at 2000 runes on a rune boundary")
+  var rejectedNegative = false
+  try:
+    discard playerFailurePayload(-1, "bad", PlayerFailureKindError)
+  except ValueError:
+    rejectedNegative = true
+  check(rejectedNegative, "negative failed_policy_index must be rejected")
+
 echo "test_engine: ok"

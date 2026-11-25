@@ -183,6 +183,8 @@ when isMainModule:
                 else:
                   reply["source"] = %"fallback"
                   reply["cause"] = %completion.cause
+                  if response.code < 200 or response.code >= 300:
+                    reply["detail"] = %("HTTP " & $response.code)
             reply["training_attempt"] = attemptEvidenceJson(evidence)
             socket.send($reply)
           continue

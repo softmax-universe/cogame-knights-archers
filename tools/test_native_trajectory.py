@@ -218,9 +218,14 @@ for flow in selected_flows:
                 assert game_exit != 0, f"{flow} must exit non-zero, got {game_exit}"
                 assert not (output / "results.json").exists(), f"{flow} must not write numeric results.json"
                 failure_doc = json.loads((output / "player_failure.json").read_text())
+                assert set(failure_doc.keys()) == {"failed_policy_index", "message", "kind"}, failure_doc
                 assert failure_doc["failed_policy_index"] == 0
+                assert isinstance(failure_doc["message"], str) and 1 <= len(failure_doc["message"]) <= 2000
                 expected_kind = "infrastructure" if flow in {"provider-error", "timeout"} else "invalid_action"
-                assert failure_doc["failure_kind"] == expected_kind, failure_doc
+                expected_player_failure_kind = (
+                    "episode_inconclusive" if flow in {"provider-error", "timeout"} else "player_error"
+                )
+                assert failure_doc["kind"] == expected_player_failure_kind, failure_doc
                 assert episode["status"] == "failed" and episode["outcome"]["reason"] == "failed"
                 assert "scores" not in episode["outcome"] and "win" not in episode["outcome"]
                 assert "teamScore" not in episode["outcome"]

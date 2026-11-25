@@ -91,8 +91,9 @@ for flow in ['mixed-no-credentials','during-http','terminal-grace','within-deadl
    assert processes[0].wait(timeout=30)!=0
    assert not (output/'results.json').exists()
    failure=json.loads((output/'player_failure.json').read_text())
-   assert failure['failed_policy_index']==1 and failure['cause']=='no_credentials' and failure['failure_kind']=='infrastructure'
-   results[flow]={'terminated_unscored':True,'cause':failure['cause']};print(flow,results[flow],flush=True)
+   assert set(failure.keys())=={'failed_policy_index','message','kind'}
+   assert failure['failed_policy_index']==1 and failure['kind']=='episode_inconclusive' and 'no_credentials' in failure['message']
+   results[flow]={'terminated_unscored':True,'kind':failure['kind']};print(flow,results[flow],flush=True)
    continue
   if flow in ['during-http','within-deadline','after-deadline']:assert started.wait(15),'actual model request never reached HTTP fixture'
   elif flow=='terminal-grace':
