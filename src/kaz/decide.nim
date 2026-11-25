@@ -8,13 +8,12 @@
 ## one after another would quadruple the wall clock for no gain. An episode has
 ## at most 4 x 48 = 192 player decisions, at most 4 in flight.
 ##
-## DEGRADE, NEVER HANG. Every wait here is bounded: attempt 1 gets
-## `attempt1Ms`, the single retry gets `retryMs`, and the whole turn is
-## wrapped in a monotonic `turnBudgetMs` deadline. A provider throttle or
-## credential-free player reports failure immediately. On a second failure the
-## seat receives NO directive for that turn (hero stands idle with mask 0) and
-## a `fallback` record names the cause — no scripted `phalanx` move is ever
-## silently substituted for a failed model seat.
+## DEGRADE, NEVER HANG. Every wait here is bounded: each model decision gets
+## one parallel attempt within `min(turnBudgetMs, attempt1Ms)`. A provider
+## throttle, credential-free player, timeout, transport error, or invalid/
+## unparseable directive records the failure cause immediately without
+## substituting a scripted or idle move; the host terminates the interrupted
+## episode unscored.
 ##
 ## THE RATE FLOOR. Hosted inference can cap requests per minute per episode, and
 ## four seats per turn would exceed that at any fast cadence. A
@@ -26,6 +25,16 @@ import
   bitworld/decision_trajectory,
   sim, control, directives, baselines, llm
 export prompts
+
+const
+  FailureKindInfra* = "infrastructure"
+  FailureKindInvalidAction* = "invalid_action"
+
+proc failureKindFor*(cause: string): string =
+  if cause in ["no_credentials", "throttled", "transport_error", "timeout", "budget_guard"]:
+    FailureKindInfra
+  else:
+    FailureKindInvalidAction
 
 type
   TurnDecision* = object
@@ -52,7 +61,12 @@ type
     haveDirective*: seq[bool]
     lastBatchStart*: MonoTime
     batchStarted*: bool
-    llmOff*: bool              ## the budget guard fired; scripted from here on
+    llmOff*: bool              ## the budget guard fired; model episode cannot continue
+    failed*: bool              ## true when a model seat failed on the current turn
+    failedSeat*: int
+    failureCause*: string
+    failureKind*: string
+    failureDetail*: string
     records*: seq[string]      ## chat records queued for the replay writer
     ## The counters as they stood when the PREVIOUS turn was issued. The seat
     ## view's `last_turn` block is the difference, which is the one thing a
@@ -73,6 +87,7 @@ proc initDecisionEngine*(sim: SimServer, selection: PromptSelection): DecisionEn
   result.seats = newSeq[SeatPolicy](sim.seatCount())
   result.directives = newSeq[SquadDirective](sim.seatCount())
   result.haveDirective = newSeq[bool](sim.seatCount())
+  result.failedSeat = -1
   for i in 0 ..< result.seats.len:
     result.seats[i].baseline = blPhalanx
     result.seats[i].label = "phalanx"
@@ -336,24 +351,43 @@ proc turn*(
   exchange: DecisionExchange
 ): seq[string] =
   ## Runs ONE decision turn and installs each seat's directive. Returns the
-  ## replay chat records this turn produced. Rejected or missing model replies
-  ## leave that seat without a directive for the turn (hero stands idle).
+  ## replay chat records this turn produced. Any failed model decision sets
+  ## `engine.failed = true` with cause/kind/seat so the host terminates the
+  ## interrupted episode unscored without substituting a scripted or idle move.
   let
     wave = sim.gameIndex + 1
     budget = initDuration(milliseconds = max(1, sim.config.turnBudgetMs))
 
-  # --- budget guard: settle EARLY rather than overrun -----------------------
+  engine.failed = false
+  engine.failedSeat = -1
+  engine.failureCause = ""
+  engine.failureKind = ""
+  engine.failureDetail = ""
+
+  proc recordFailure(engine: var DecisionEngine, seat: int, cause, detail: string) =
+    if not engine.failed:
+      engine.failed = true
+      engine.failedSeat = seat
+      engine.failureCause = cause
+      engine.failureKind = failureKindFor(cause)
+      engine.failureDetail = detail
+
+  # --- budget guard: interrupt rather than overrun or substitute ------------
   # If two more full turns would not fit inside the engine's own wall-clock
-  # stop, switch the LLM off for the rest of the episode so the episode ends
-  # inside budget instead of overrunning.
-  if not engine.llmOff:
+  # stop, do not substitute scripted or idle moves for model seats.
+  var hasLlmSeat = false
+  for seat in 0 ..< engine.seats.len:
+    if engine.seats[seat].isLlm:
+      hasLlmSeat = true
+      break
+  if hasLlmSeat and not engine.llmOff:
     let turnSeconds = (sim.config.turnBudgetMs + sim.config.turnSpacingMs + 999) div 1000
     if elapsedSeconds + 2 * turnSeconds > sim.config.wallClockBudgetSeconds:
       engine.llmOff = true
       result.add(budgetGuardRecord(
         turnIndex, max(0, sim.config.wallClockBudgetSeconds - elapsedSeconds)))
       echo "knights-archers: budget guard fired at turn ", turnIndex,
-        "; remaining model turns stand idle"
+        "; interrupting episode unscored"
 
   var views = newSeq[JsonNode](engine.seats.len)
   engine.decisions = newSeq[TurnDecision](engine.seats.len)
@@ -367,20 +401,19 @@ proc turn*(
 
   # --- which seats need a call? --------------------------------------------
   var open: seq[int]
-  var failureCauses = newSeq[string](engine.seats.len)
   for seat in 0 ..< engine.seats.len:
     if engine.seats[seat].isLlm and not engine.llmOff:
       engine.haveDirective[seat] = false
-      failureCauses[seat] = "timeout"
       open.add(seat)
     elif engine.seats[seat].isLlm:
       engine.haveDirective[seat] = false
       engine.decisions[seat].status = asMissing
       let cause = "budget_guard"
-      result.add(fallbackRecord(wave, turnIndex, seat, 1, cause,
-        "wall-clock budget guard disabled model turns; hero stands idle"))
+      let detail = "wall-clock budget guard interrupted model turn"
+      result.add(fallbackRecord(wave, turnIndex, seat, 1, cause, detail))
+      engine.recordFailure(seat, cause, detail)
       echo "knights-archers llm: seat ", seat, " failed (", cause,
-        ") on turn ", turnIndex, "; hero stands idle"
+        ") on turn ", turnIndex, "; episode interrupted"
     else:
       var directive = scriptedDirective(views[seat].policyView(), engine.seats[seat].baseline)
       directive.source = dsScripted
@@ -414,126 +447,119 @@ proc turn*(
 
   # Rate-limit waiting precedes the per-turn inference deadline.
   let turnStart = getMonoTime()
-  # --- up to two PARALLEL batches ------------------------------------------
-  var attempt = 0
-  while open.len > 0 and attempt < 2:
+  # --- one PARALLEL batch per model decision --------------------------------
+  if open.len > 0:
     if getMonoTime() - turnStart >= budget:
       for seat in open:
-        failureCauses[seat] = "timeout"
-        result.add(fallbackRecord(
-          wave, turnIndex, seat, attempt + 1, "timeout",
-          "per-turn budget exhausted before attempt " & $(attempt + 1)))
-      break
-    let remainingMs = (budget - (getMonoTime() - turnStart)).inMilliseconds.int
-    let deadlineMs = min(remainingMs,
-      if attempt == 0: sim.config.attempt1Ms else: sim.config.retryMs)
-    var requests: seq[JsonNode]
-    for seat in open:
-      requests.add(%*{
-        "type": "decision",
-        "protocol": "kaz.player.v2",
-        "id": (sim.gameIndex + 1) * 100_000 + turnIndex * 10 + attempt,
-        "slot": seat,
-        "attempt": attempt + 1,
-        "timeout_ms": deadlineMs,
-        "prompt_configuration": {"promptVariant": $engine.selection.variant, "promptSeed": engine.selection.seed},
-        "view": views[seat]
-      })
-    let started = getMonoTime()
-    let responses = exchange(requests, deadlineMs)
-    let latency = (getMonoTime() - started).inMilliseconds.int
-    var stillOpen: seq[int]
-    for position, seat in open:
-      var cause = "timeout"
-      var evidence = newDecisionAttempt($wave & "-" & $turnIndex & "-" & $seat & "-" & $(attempt + 1),
-        engine.seats[seat].label, aoUnknown)
-      evidence.latencyMs = some(float(latency))
-      try:
-        if responses[position].len == 0:
-          raise newException(ValueError, "player action timed out")
-        cause = "parse_error"
-        let response = parseJson(responses[position])
-        if response.hasKey("training_attempt") and response["training_attempt"].kind != JNull:
-          evidence = readAttemptEvidence(response["training_attempt"])
-          evidence.attemptId = $wave & "-" & $turnIndex & "-" & $seat & "-" & $(attempt + 1)
-          if evidence.origin in {aoTeacher, aoHuman}: evidence.origin = aoUnknown
-        if response["type"].getStr() != "action" or
-            response["protocol"].getStr() != "kaz.player.v2":
-          raise newException(ValueError, "wrong player action protocol")
-        if response["id"].getInt() != requests[position]["id"].getInt():
-          raise newException(ValueError, "player action id mismatch")
-        if response{"source"}.getStr() == "fallback":
-          let reported = response{"cause"}.getStr()
-          let why = if reported in ["no_credentials", "throttled",
-              "transport_error", "timeout", "parse_error"]:
-              reported else: "parse_error"
-          failureCauses[seat] = why
-          result.add(fallbackRecord(wave, turnIndex, seat, attempt + 1,
-            why, "player policy reported failure"))
+        let detail = "per-turn budget exhausted before attempt 1"
+        result.add(fallbackRecord(wave, turnIndex, seat, 1, "timeout", detail))
+        engine.decisions[seat].status = asMissing
+        engine.recordFailure(seat, "timeout", detail)
+    else:
+      let remainingMs = (budget - (getMonoTime() - turnStart)).inMilliseconds.int
+      let deadlineMs = min(remainingMs, sim.config.attempt1Ms)
+      var requests: seq[JsonNode]
+      for seat in open:
+        requests.add(%*{
+          "type": "decision",
+          "protocol": "kaz.player.v2",
+          "id": (sim.gameIndex + 1) * 100_000 + turnIndex * 10,
+          "slot": seat,
+          "attempt": 1,
+          "timeout_ms": deadlineMs,
+          "prompt_configuration": {"promptVariant": $engine.selection.variant, "promptSeed": engine.selection.seed},
+          "view": views[seat]
+        })
+      let started = getMonoTime()
+      let responses = exchange(requests, deadlineMs)
+      let latency = (getMonoTime() - started).inMilliseconds.int
+      for position, seat in open:
+        var cause = "timeout"
+        var evidence = newDecisionAttempt($wave & "-" & $turnIndex & "-" & $seat & "-1",
+          engine.seats[seat].label, aoUnknown)
+        evidence.latencyMs = some(float(latency))
+        try:
+          if responses[position].len == 0:
+            raise newException(ValueError, "player action timed out")
+          cause = "parse_error"
+          let response = parseJson(responses[position])
+          if response.hasKey("training_attempt") and response["training_attempt"].kind != JNull:
+            evidence = readAttemptEvidence(response["training_attempt"])
+            evidence.attemptId = $wave & "-" & $turnIndex & "-" & $seat & "-1"
+            if evidence.origin in {aoTeacher, aoHuman}: evidence.origin = aoUnknown
+          if response["type"].getStr() != "action" or
+              response["protocol"].getStr() != "kaz.player.v2":
+            raise newException(ValueError, "wrong player action protocol")
+          if response["id"].getInt() != requests[position]["id"].getInt():
+            raise newException(ValueError, "player action id mismatch")
+          if response{"source"}.getStr() == "fallback":
+            let reported = response{"cause"}.getStr()
+            let why = if reported in ["no_credentials", "throttled",
+                "transport_error", "timeout", "parse_error"]:
+                reported else: "parse_error"
+            let detail = block:
+              let d = response{"detail"}.getStr()
+              if d.len > 0: d else: "player policy reported failure: " & why
+            result.add(fallbackRecord(wave, turnIndex, seat, 1, why, detail))
+            engine.haveDirective[seat] = false
+            engine.decisions[seat].status =
+              if failureKindFor(why) == FailureKindInfra: asMissing else: asRejected
+            evidence.rejectionReason = some(if evidence.origin == aoModel and evidence.rawResponse.kind == JNull:
+              "incomplete_native_attempt: " & why & " before HTTP response" else: why)
+            engine.decisions[seat].attempts.add(evidence)
+            engine.recordFailure(seat, why, detail)
+            echo "knights-archers llm: seat ", seat, " failed (", why,
+              ") on turn ", turnIndex, "; episode interrupted"
+            continue
+          if response{"source"}.getStr() != "llm":
+            raise newException(ValueError, "player action source must be llm")
+          let commanded = sim.commandedCogs(seat)
+          var ids: seq[string]
+          for cogIndex in commanded:
+            ids.add(sim.cogAlias(cogIndex))
+          let parsed = parseSquadDirective(
+            response["action"], ids, commanded,
+            MapWidth - 1, MapHeight - 1)
+          if not parsed.ok: raise newException(DirectiveError, parsed.reason)
+          var directive = parsed.directive
+          let proposal = directive.actionJson()
+          evidence.parsedAction = proposal
+          if evidence.origin == aoModel:
+            let generated = jsonProposal(evidence.response.getStr())
+            if not generated.ok: raise newException(DirectiveError, generated.reason)
+            let independentlyParsed = parseSquadDirective(generated.node, ids, commanded,
+              MapWidth - 1, MapHeight - 1)
+            if not independentlyParsed.ok: raise newException(DirectiveError, independentlyParsed.reason)
+            evidence.parsedAction = independentlyParsed.directive.actionJson()
+            if evidence.parsedAction != proposal:
+              raise newException(ValueError, "model response differs from submitted directive")
+          directive.source = dsLlm
+          directive.latencyMs = latency
+          evidence.accepted = true
+          engine.decisions[seat].selectedAttemptId = some(evidence.attemptId)
+          engine.decisions[seat].status = asAccepted
+          engine.directives[seat] = directive
+          engine.haveDirective[seat] = true
+        except CatchableError as error:
           engine.haveDirective[seat] = false
           engine.decisions[seat].status =
-            if why in ["timeout", "no_credentials"]: asMissing else: asRejected
+            if failureKindFor(cause) == FailureKindInfra: asMissing else: asRejected
+          result.add(fallbackRecord(wave, turnIndex, seat, 1, cause, error.msg))
+          echo "knights-archers llm: seat ", seat, " failed (", cause,
+            ") on turn ", turnIndex, ": ", error.msg
           evidence.rejectionReason = some(if evidence.origin == aoModel and evidence.rawResponse.kind == JNull:
-            "incomplete_native_attempt: " & why & " before HTTP response" else: why)
-          engine.decisions[seat].attempts.add(evidence)
-          if why notin ["no_credentials", "throttled"]: stillOpen.add(seat)
-          continue
-        if response{"source"}.getStr() != "llm":
-          raise newException(ValueError, "player action source must be llm")
-        let commanded = sim.commandedCogs(seat)
-        var ids: seq[string]
-        for cogIndex in commanded:
-          ids.add(sim.cogAlias(cogIndex))
-        let parsed = parseSquadDirective(
-          response["action"], ids, commanded,
-          MapWidth - 1, MapHeight - 1)
-        if not parsed.ok: raise newException(DirectiveError, parsed.reason)
-        var directive = parsed.directive
-        let proposal = directive.actionJson()
-        evidence.parsedAction = proposal
-        if evidence.origin == aoModel:
-          let generated = extractJsonObject(evidence.response.getStr())
-          let independentlyParsed = parseSquadDirective(generated, ids, commanded,
-            MapWidth - 1, MapHeight - 1)
-          if not independentlyParsed.ok: raise newException(DirectiveError, independentlyParsed.reason)
-          evidence.parsedAction = independentlyParsed.directive.actionJson()
-          if evidence.parsedAction != proposal:
-            raise newException(ValueError, "model response differs from submitted directive")
-        directive.source = dsLlm
-        directive.latencyMs = latency
-        evidence.accepted = true
-        engine.decisions[seat].selectedAttemptId = some(evidence.attemptId)
-        engine.decisions[seat].status = asAccepted
-        engine.directives[seat] = directive
-        engine.haveDirective[seat] = true
-      except CatchableError as error:
-        failureCauses[seat] = cause
-        result.add(fallbackRecord(
-          wave, turnIndex, seat, attempt + 1, cause, cause))
-        echo "knights-archers llm: seat ", seat, " attempt ", attempt + 1,
-          " failed: ", cause
-        evidence.rejectionReason = some(if evidence.origin == aoModel and evidence.rawResponse.kind == JNull:
-          "incomplete_native_attempt: " & cause & " before HTTP response" else: cause)
-        stillOpen.add(seat)
-      engine.decisions[seat].attempts.add(evidence)
-    open = stillOpen
-    inc attempt
-
-  # --- anything still open has no directive for this turn (hero stands idle) -
-  for seat in open:
-    engine.haveDirective[seat] = false
-    let cause = failureCauses[seat]
-    engine.decisions[seat].status =
-      if cause in ["timeout", "no_credentials"]: asMissing else: asRejected
-    result.add(fallbackRecord(wave, turnIndex, seat, 2, cause,
-      "seat failed to produce a valid directive; hero stands idle"))
-    echo "knights-archers llm: seat ", seat, " failed (", cause,
-      ") on turn ", turnIndex, "; hero stands idle"
+            "incomplete_native_attempt: " & cause & " before HTTP response" else: cause)
+          engine.recordFailure(seat, cause, error.msg)
+        engine.decisions[seat].attempts.add(evidence)
 
   for seat in 0 ..< engine.seats.len:
     engine.decisions[seat].executedAction =
-      if engine.haveDirective[seat]: engine.directives[seat].actionJson()
+      if not engine.failed and engine.haveDirective[seat]: engine.directives[seat].actionJson()
       else: newJNull()
+    if engine.failed:
+      engine.decisions[seat].selectedAttemptId = none(string)
+      if engine.decisions[seat].status == asAccepted:
+        engine.decisions[seat].status = asMissing
     var hashes = newJArray()
     for attempt in engine.decisions[seat].attempts:
       if attempt.prompt.kind == JArray and attempt.prompt.len == 2:

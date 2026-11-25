@@ -275,23 +275,47 @@ manifest = {
             ],
         },
     },
-    "player": [{
-        "id": "baseline",
-        "type": "player",
-        "name": "Phalanx Baseline",
-        "description": (
-            "Scripted hero: knights intercept the two leading zombies, archers "
-            "focus-fire and back off when anything gets close."),
-        "image": "{{KNIGHTS_ARCHERS_IMAGE}}",
-        "run": ["/bin/knights-archers-player"],
-        "env": {"PLAYER_SCRIPTED": "phalanx"},
-        "source_url":
-            "https://github.com/softmax-universe/cogame-knights-archers/tree/main",
-        "resources": {
-            "requests": {"cpu": "100m", "memory": "64Mi"},
-            "limits": {"cpu": "1"},
+    "player": [
+        {
+            "id": "prompt",
+            "type": "player",
+            "name": "Prompt Reference",
+            "description": (
+                "Claude prompt policy over the private kaz.player.v2 observation "
+                "and ordinary squad directive."),
+            "image": "{{KNIGHTS_ARCHERS_IMAGE}}",
+            "run": ["/bin/knights-archers-player"],
+            "env": {
+                "COWORLD_LLM_ENABLED": "true",
+                "PLAYER_PROMPT": (
+                    "Hold the gate line. Coordinate targets with your squad; "
+                    "archers stay outside zombie reach."),
+            },
+            "source_url":
+                "https://github.com/softmax-universe/cogame-knights-archers/tree/main",
+            "resources": {
+                "requests": {"cpu": "100m", "memory": "64Mi"},
+                "limits": {"cpu": "1"},
+            },
         },
-    }],
+        {
+            "id": "baseline",
+            "type": "player",
+            "name": "Phalanx Baseline",
+            "description": (
+                "Scripted hero: knights intercept the two leading zombies, archers "
+                "focus-fire and back off when anything gets close."),
+            "image": "{{KNIGHTS_ARCHERS_IMAGE}}",
+            "run": ["/bin/knights-archers-player"],
+            "env": {"PLAYER_SCRIPTED": "phalanx"},
+            "source_url":
+                "https://github.com/softmax-universe/cogame-knights-archers/tree/main",
+            "resources": {
+                "requests": {"cpu": "100m", "memory": "64Mi"},
+                "limits": {"cpu": "1"},
+            },
+        },
+    ],
     "variants": variants,
     "certification": {
         "players": [{"player_id": "baseline"} for _ in range(4)],

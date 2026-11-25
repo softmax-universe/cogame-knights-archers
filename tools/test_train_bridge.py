@@ -119,11 +119,10 @@ def play_language(binary: Path, variant: str) -> None:
         initial = observation
         rejected = request({"kind": "step", "decision_id": initial["decision_id"], "response": "not json"})
         assert rejected["kind"] == "rejected" and rejected["observation"] == initial
-        consumed = request({"kind": "step", "decision_id": initial["decision_id"], "response": "{}"})
-        assert consumed["kind"] == "consumed_rejection"
-        assert consumed["action"] is None
-        observation = consumed["observation"]
-        decisions = 1
+        rejected2 = request({"kind": "step", "decision_id": initial["decision_id"], "response": "{}"})
+        assert rejected2["kind"] == "rejected" and rejected2["observation"] == initial
+        observation = rejected2["observation"]
+        decisions = 0
         while observation["kind"] == "decision":
             assert observation["inference_mode"] == "text_action"
             assert observation["messages"][0]["role"] == "system"

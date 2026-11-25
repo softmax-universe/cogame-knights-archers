@@ -69,7 +69,7 @@ block allFourSeatsSeeOnePreActionState:
     check(parseJson(record){"k"}.getStr() != "fallback",
       "valid actions produce no fallback")
 
-block invalidActionsRetryExactlyOnce:
+block invalidActionsFailOnFirstAttemptWithNoRetry:
   var world = llmWorld()
   var engine = initDecisionEngine(world, PromptSelection())
   engine.seatEveryoneLlm()
@@ -81,20 +81,25 @@ block invalidActionsRetryExactlyOnce:
     inc attempts
     result = newSeq[string](requests.len)
     for position, request in requests:
-      result[position] = if attempts == 1: "not json" else: validReply(request)
+      result[position] = "not json"
   let records = engine.turn(world, 0, 24, 0, exchange)
-  check(attempts == 2, "one retry after unusable replies")
+  check(attempts == 1, "one attempt per model decision, no silent retry")
+  check(engine.failed, "invalid model reply must fail the turn")
+  check(engine.failedSeat == 0, "first failed seat is recorded")
+  check(engine.failureKind == FailureKindInvalidAction, "invalid reply is invalid_action")
+  check(engine.failureCause == "parse_error", "cause is parse_error")
   var errors = 0
   for record in records:
     let node = parseJson(record)
     if node{"k"}.getStr() == "fallback":
-      check(node["attempt"].getInt() == 1, "only first attempts fail")
+      check(node["attempt"].getInt() == 1, "only single attempt runs")
       if node["cause"].getStr() == "parse_error":
         inc errors
   check(errors == 4, "each unusable action records one parse error")
   for seat in 0 ..< world.seatCount():
-    check(engine.directives[seat].source == dsLlm,
-      "the second accepted action drives each hero")
+    check(not engine.haveDirective[seat], "failed turn installs no directive")
+    check(engine.decisions[seat].status == asRejected, "invalid reply records rejected status")
+    check(engine.decisions[seat].executedAction.kind == JNull, "invalid reply executes no directive")
 
 block missingActionsHaveOneSharedDeadlineAndNoFallback:
   var world = llmWorld()
@@ -106,11 +111,13 @@ block missingActionsHaveOneSharedDeadlineAndNoFallback:
     requests: seq[JsonNode], timeoutMs: int
   ): seq[string] {.closure.} =
     deadlines.add(timeoutMs)
-    check(requests.len == 4, "each attempt sends all four views together")
+    check(requests.len == 4, "attempt sends all four views together")
     newSeq[string](requests.len)
   let records = engine.turn(world, 0, 24, 0, exchange)
-  check(deadlines == @[world.config.attempt1Ms, world.config.retryMs],
-    "the two batch deadlines preserve exact millisecond budgets")
+  check(deadlines == @[world.config.attempt1Ms],
+    "single batch deadline preserves exact millisecond budget")
+  check(engine.failed and engine.failureKind == FailureKindInfra and engine.failureCause == "timeout",
+    "timeout is recorded as infrastructure failure")
   for seat in 0 ..< world.seatCount():
     check(not engine.haveDirective[seat],
       "a missing action must not silently install a phalanx fallback")
@@ -126,7 +133,7 @@ block missingActionsHaveOneSharedDeadlineAndNoFallback:
   for record in records:
     if parseJson(record){"cause"}.getStr() == "timeout":
       inc timeouts
-  check(timeouts == 12, "both attempts and terminal records name every seat timeout")
+  check(timeouts == 4, "single attempt names every seat timeout")
 
 block aCredentialFreePlayerReportsFailureImmediately:
   var world = llmWorld()
@@ -147,6 +154,9 @@ block aCredentialFreePlayerReportsFailureImmediately:
       }
   let records = engine.turn(world, 0, 24, 0, exchange)
   check(batches == 1, "explicit no-credential failure does not retry")
+  check(engine.failed and engine.failureKind == FailureKindInfra and
+        engine.failureCause == "no_credentials",
+    "no_credentials is recorded as infrastructure failure")
   var noCredentials = 0
   for record in records:
     if parseJson(record){"cause"}.getStr() == "no_credentials":
@@ -160,7 +170,7 @@ block aCredentialFreePlayerReportsFailureImmediately:
     check(engine.decisions[seat].executedAction.kind == JNull,
       "credential-free seat executes no directive")
 
-block theBudgetGuardSettlesEarlyRatherThanOverrunning:
+block theBudgetGuardInterruptsModelTurnsUnscored:
   var world = llmWorld()
   var engine = initDecisionEngine(world, PromptSelection())
   engine.seatEveryoneLlm()
@@ -173,6 +183,9 @@ block theBudgetGuardSettlesEarlyRatherThanOverrunning:
     raise newException(ValueError, "budget guard must avoid the exchange")
   let records = engine.turn(world, 20, 24, elapsed, exchange)
   check(engine.llmOff, "the budget guard must latch")
+  check(engine.failed and engine.failureKind == FailureKindInfra and
+        engine.failureCause == "budget_guard",
+    "budget guard records infrastructure failure for model seats")
   var guarded = false
   for record in records:
     if parseJson(record){"k"}.getStr() == "budget_guard":
@@ -242,11 +255,13 @@ block modelResponseMustMatchExecutedProposal:
       reply["training_attempt"] = attemptEvidenceJson(evidence)
       result[position] = $reply
   discard engine.turn(world, 0, 24, 0, exchange)
+  check(engine.failed and engine.failureKind == FailureKindInvalidAction,
+    "model/action mismatch fails the turn")
   for seat, decision in engine.decisions:
     check(not engine.haveDirective[seat], "model/action mismatch installs no directive")
     check(decision.status == asRejected, "model/action mismatch records rejected status")
     check(decision.executedAction.kind == JNull, "rejected turn executes no directive")
-    check(decision.attempts.len == 2, "all mismatched attempts are retained")
+    check(decision.attempts.len == 1, "single mismatched attempt is retained")
     for attempt in decision.attempts:
       check(not attempt.accepted, "mismatched model response cannot become a target")
       check(attempt.parsedAction != decision.executedAction, "independent proposal remains distinct from empty execution")
@@ -255,7 +270,26 @@ block fencedModelResponseAcceptedAndProseRejected:
   var world = llmWorld()
   var engine = initDecisionEngine(world, PromptSelection())
   engine.seatEveryoneLlm()
-  let exchange: DecisionExchange = proc(requests: seq[JsonNode], timeoutMs: int): seq[string] =
+  let fencedExchange: DecisionExchange = proc(requests: seq[JsonNode], timeoutMs: int): seq[string] =
+    result = newSeq[string](requests.len)
+    for position, request in requests:
+      var reply = parseJson(validReply(request))
+      var evidence = newDecisionAttempt("player", "model-fixture", aoModel)
+      let rawAction = $reply["action"]
+      evidence.response = %("```json\n" & rawAction & "\n```")
+      evidence.rawResponse = evidence.response
+      reply["training_attempt"] = attemptEvidenceJson(evidence)
+      result[position] = $reply
+  discard engine.turn(world, 0, 24, 0, fencedExchange)
+  check(not engine.failed, "all-fenced valid turn succeeds")
+  for seat in 0 ..< world.seatCount():
+    check(engine.haveDirective[seat] and engine.decisions[seat].status == asAccepted,
+      "single outer json fence is accepted")
+
+  var proseWorld = llmWorld()
+  var proseEngine = initDecisionEngine(proseWorld, PromptSelection())
+  proseEngine.seatEveryoneLlm()
+  let proseExchange: DecisionExchange = proc(requests: seq[JsonNode], timeoutMs: int): seq[string] =
     result = newSeq[string](requests.len)
     for position, request in requests:
       var reply = parseJson(validReply(request))
@@ -268,14 +302,16 @@ block fencedModelResponseAcceptedAndProseRejected:
       evidence.rawResponse = evidence.response
       reply["training_attempt"] = attemptEvidenceJson(evidence)
       result[position] = $reply
-  discard engine.turn(world, 0, 24, 0, exchange)
-  check(engine.haveDirective[0] and engine.decisions[0].status == asAccepted,
-    "single outer json fence is accepted")
-  for seat in 1 ..< world.seatCount():
-    check(not engine.haveDirective[seat] and engine.decisions[seat].status == asRejected,
+  discard proseEngine.turn(proseWorld, 0, 24, 0, proseExchange)
+  check(proseEngine.failed and proseEngine.failedSeat == 1 and
+        proseEngine.failureKind == FailureKindInvalidAction,
+    "surrounding prose fails the turn on seat 1")
+  for seat in 0 ..< proseWorld.seatCount():
+    check(proseEngine.decisions[seat].executedAction.kind == JNull,
+      "aborted turn executes no directive for any seat")
+  for seat in 1 ..< proseWorld.seatCount():
+    check(not proseEngine.haveDirective[seat] and proseEngine.decisions[seat].status == asRejected,
       "surrounding prose is rejected without phalanx fallback")
-    check(engine.decisions[seat].executedAction.kind == JNull,
-      "rejected prose executes no directive")
 
 block aScriptedTeacherDoesNotClaimModelInference:
   var world = llmWorld()

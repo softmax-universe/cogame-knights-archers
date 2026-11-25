@@ -218,19 +218,15 @@ when isMainModule:
           parsed = parseSquadDirective(json.node, @[game.cogAlias(seat)], @[seat],
             MapWidth - 1, MapHeight - 1)
         if not json.ok or not parsed.ok:
-          inc rejected
-          if rejected < 2:
-            response = %*{"kind": "rejected", "reason": "parse_error",
-              "observation": views[seat].decision(seat, id, language, operatorPrompt, selection)}
-            stdout.flushFile()
-            doAssert dup2(protocolFd, 1) >= 0
-            stdout.writeLine($response)
-            stdout.flushFile()
-            doAssert dup2(2, 1) >= 0
-            continue
-          consumed = true
-          engine.haveDirective[seat] = false
-          candidate = newJNull()
+          let reason = if not json.ok: json.reason else: parsed.reason
+          response = %*{"kind": "rejected", "reason": "parse_error", "detail": reason,
+            "observation": views[seat].decision(seat, id, language, operatorPrompt, selection)}
+          stdout.flushFile()
+          doAssert dup2(protocolFd, 1) >= 0
+          stdout.writeLine($response)
+          stdout.flushFile()
+          doAssert dup2(2, 1) >= 0
+          continue
         else:
           directive = parsed.directive
           candidate = directive.actionJson()

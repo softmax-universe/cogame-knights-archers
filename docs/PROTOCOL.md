@@ -67,12 +67,14 @@ exchanges private JSON decision frames with the game:
    ```
 
    With no credential, a model player returns `source:"fallback"` and
-   `cause:"no_credentials"`. The game validates directives strictly, then
-   compiles accepted directives to actuator masks. Missing or invalid replies
-   get one retry; after a second failure no directive is installed for that
-   turn (the hero stands idle with mask 0) and a `fallback` record names the
-   cause. Both attempts share the turn's seven-second budget. The replay
-   records the accepted directive and masks, never a model request or secret.
+   `cause:"no_credentials"`. The game validates directives strictly with one
+   attempt per model decision, then compiles accepted directives to actuator
+   masks. Any missing, timed-out, infrastructure-failed, or invalid model reply
+   records a `fallback` diagnostic and `COGAME_PLAYER_FAILURE_URI` cause, and
+   terminates the interrupted episode unscored (no `COGAME_RESULTS_URI` score
+   document is written and no scripted or idle move is substituted). The replay
+   records the accepted directives, masks, and failure diagnostic, never a
+   model request or secret.
 
 Every hero, every zombie and every arrow appears in every seat's frame:
 `fogOfWar` is false in every shipped variant.

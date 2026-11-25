@@ -44,17 +44,27 @@ block numAgentsIsFourEverywhere:
     "certification.game_config.players must name four seats")
   check(not cert["game_config"].hasKey("tokens"),
     "the cert fixture must not carry runner-managed tokens")
-  ## Every DECLARED player must occupy a certification slot (the raid 0.1.2
-  ## `players_missing` scar).
+  ## The first declared player is the native model player (`COWORLD_LLM_ENABLED=true`,
+  ## no `PLAYER_SCRIPTED`), and `baseline` is declared separately for purely scripted
+  ## offline certification.
+  check(manifest["player"].len >= 2, "manifest must declare model and scripted players")
+  let firstPlayer = manifest["player"][0]
+  check(firstPlayer["id"].getStr() == "prompt",
+    "first manifest player must be the native model player")
+  check(firstPlayer["env"].hasKey("COWORLD_LLM_ENABLED") and
+        firstPlayer["env"]["COWORLD_LLM_ENABLED"].getStr() == "true",
+    "first manifest player must set COWORLD_LLM_ENABLED=true")
+  check(not firstPlayer["env"].hasKey("PLAYER_SCRIPTED"),
+    "native model player must not set PLAYER_SCRIPTED")
   var declared: seq[string]
   for player in manifest["player"]:
     declared.add(player["id"].getStr())
-  for id in declared:
-    var seated = false
-    for slot in cert["players"]:
-      if slot["player_id"].getStr() == id:
-        seated = true
-    check(seated, "declared player " & id & " occupies no certification slot")
+  check("baseline" in declared, "manifest must declare explicit scripted baseline player")
+  for slot in cert["players"]:
+    let id = slot["player_id"].getStr()
+    check(id in declared, "certification player " & id & " is not declared")
+    check(id == "baseline",
+      "offline certification must use purely scripted baseline seats, got " & id)
 
 block theUploadContractHolds:
   check(manifest.hasKey("$schema"), "the manifest needs $schema")

@@ -153,11 +153,6 @@ proc jsonProposal*(text: string): JsonProposal =
     return parseJsonObject(trimmed[firstNl + 1 ..< lastNl])
   parseJsonObject(trimmed)
 
-proc extractJsonObject*(text: string): JsonNode =
-  let proposal = jsonProposal(text)
-  if not proposal.ok: raise newException(DirectiveError, proposal.reason)
-  proposal.node
-
 proc readCoord(node: JsonNode): tuple[ok: bool, value: int] =
   ## One target/face coordinate: a finite JSON number (int or float).
   if node.isNil:

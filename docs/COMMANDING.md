@@ -42,9 +42,10 @@ Claude. No seat sees another's current-turn order or operator prompt.
 Parsing is strict: reply with exactly one JSON object, either bare or inside a
 single outer Markdown code fence (` ``` ` or ` ```json `). Surrounding prose,
 extra JSON objects, legacy wrapper shapes, unknown fields, and invalid field
-values are rejected. Missing or rejected replies get one retry; after a second
-failure the seat receives no directive for that turn (its hero stands idle) and
-a `fallback` record in the replay names the cause.
+values are rejected. Each model decision gets one attempt; any missing,
+timed-out, infrastructure-failed, or invalid reply records the failure cause
+and terminates the interrupted episode unscored rather than substituting a
+scripted or idle move.
 
 ## What actually wins
 

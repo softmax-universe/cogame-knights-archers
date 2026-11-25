@@ -52,13 +52,15 @@ when isMainModule:
   if url.len == 0:
     quit("COWORLD_PLAYER_WS_URL is not set", 1)
   let
-    prompt = getEnv("PLAYER_PROMPT").strip()
+    rawPrompt = getEnv("PLAYER_PROMPT").strip()
     scripted = getEnv("PLAYER_SCRIPTED").strip()
-    kind = if prompt.len > 0: "prompt" else: "scripted"
+    llmEnabled = getEnv("COWORLD_LLM_ENABLED").strip().toLowerAscii() in ["1", "true", "yes"]
+    kind = if rawPrompt.len > 0 or llmEnabled: "prompt" else: "scripted"
+    prompt = if rawPrompt.len > 0: rawPrompt elif kind == "prompt": DefaultOperatorPrompt else: ""
     label = block:
       let explicit = getEnv("PLAYER_POLICY_LABEL").strip()
       if explicit.len > 0: explicit
-      elif prompt.len > 0: "prompt"
+      elif kind == "prompt": "prompt"
       elif scripted.len > 0: scripted
       else: "phalanx"
   let client = if kind == "prompt": newLlmClient() else: nil
@@ -149,25 +151,35 @@ when isMainModule:
               socket.send($( %*{"type": "attempt_started", "protocol": "kaz.player.v2",
                 "id": decision["id"], "training_attempt": attemptEvidenceJson(evidence)}))
               let started = getMonoTime()
-              let response = client.curl.post(request.url, request.headers, request.body, timeoutSeconds)
-              evidence.latencyMs = some(float((getMonoTime() - started).inMilliseconds))
-              evidence.responseEvidence(response.headers, response.body)
-              socket.send($( %*{"type": "attempt_response", "protocol": "kaz.player.v2",
-                "id": decision["id"], "training_attempt": attemptEvidenceJson(evidence)}))
-              let completion = client.textOf(response)
-              if completion.payload.isSome:
-                evidence.completionEvidence(completion.payload.get())
-                evidence.response = %completion.text
-              if completion.ok:
-                let proposal = jsonProposal(completion.text)
-                if proposal.ok:
-                  reply["action"] = proposal.node
+              var gotResponse = false
+              var response: Response
+              try:
+                response = client.curl.post(request.url, request.headers, request.body, timeoutSeconds)
+                gotResponse = true
+              except CatchableError:
+                reply["source"] = %"fallback"
+                reply["cause"] = %"transport_error"
+                reply["detail"] = %"model request transport error"
+              if gotResponse:
+                evidence.latencyMs = some(float((getMonoTime() - started).inMilliseconds))
+                evidence.responseEvidence(response.headers, response.body)
+                socket.send($( %*{"type": "attempt_response", "protocol": "kaz.player.v2",
+                  "id": decision["id"], "training_attempt": attemptEvidenceJson(evidence)}))
+                let completion = client.textOf(response)
+                if completion.payload.isSome:
+                  evidence.completionEvidence(completion.payload.get())
+                  evidence.response = %completion.text
+                if completion.ok:
+                  let proposal = jsonProposal(completion.text)
+                  if proposal.ok:
+                    reply["action"] = proposal.node
+                  else:
+                    reply["source"] = %"fallback"
+                    reply["cause"] = %"parse_error"
+                    reply["detail"] = %proposal.reason
                 else:
                   reply["source"] = %"fallback"
-                  reply["cause"] = %"parse_error"
-              else:
-                reply["source"] = %"fallback"
-                reply["cause"] = %completion.cause
+                  reply["cause"] = %completion.cause
             reply["training_attempt"] = attemptEvidenceJson(evidence)
             socket.send($reply)
           continue

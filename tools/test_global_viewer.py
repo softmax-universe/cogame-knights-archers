@@ -63,7 +63,7 @@ for flow in ['mixed-no-credentials','during-http','terminal-grace','within-deadl
   reserve.bind(('127.0.0.1',0));port=reserve.getsockname()[1]
  config={'num_agents':4,'seed':7,'tokens':['t0','t1','t2','t3'],'players':[{'name':str(n)} for n in range(4)],'minPlayers':4,'maxTicks':24,'maxGames':1,'turnTicks':96,'turnBudgetMs':24000,'attempt1Ms':23000,'retryMs':1000,'startWaitTicks':0,'fastMode':True,'wallClockBudgetSeconds':90,'gameOverTicks':0}
  (output/'config.json').write_text(json.dumps(config))
- env={**os.environ,'COGAME_HOST':'127.0.0.1','COGAME_PORT':str(port),'COGAME_CONFIG_URI':(output/'config.json').as_uri(),'COGAME_RESULTS_URI':(output/'results.json').as_uri(),'COGAME_SAVE_REPLAY_URI':(output/'replay.bitreplay').as_uri()}
+ env={**os.environ,'COGAME_HOST':'127.0.0.1','COGAME_PORT':str(port),'COGAME_CONFIG_URI':(output/'config.json').as_uri(),'COGAME_RESULTS_URI':(output/'results.json').as_uri(),'COGAME_PLAYER_FAILURE_URI':(output/'player_failure.json').as_uri(),'COGAME_SAVE_REPLAY_URI':(output/'replay.bitreplay').as_uri()}
  if flow in ['within-deadline','after-deadline']:
   config.update(turnBudgetMs=7000,attempt1Ms=4500,retryMs=2000)
   (output/'config.json').write_text(json.dumps(config))
@@ -87,13 +87,19 @@ for flow in ['mixed-no-credentials','during-http','terminal-grace','within-deadl
     binary=os.environ["COWORLD_TEST_MALFORMED_PLAYER"]
     penv["COWORLD_TEST_DELAY_ACTION"]="1"
    processes.append(subprocess.Popen([binary],cwd=ROOT,env=penv,stdout=log,stderr=log))
+  if flow=='mixed-no-credentials':
+   assert processes[0].wait(timeout=30)!=0
+   assert not (output/'results.json').exists()
+   failure=json.loads((output/'player_failure.json').read_text())
+   assert failure['failed_policy_index']==1 and failure['cause']=='no_credentials' and failure['failure_kind']=='infrastructure'
+   results[flow]={'terminated_unscored':True,'cause':failure['cause']};print(flow,results[flow],flush=True)
+   continue
   if flow in ['during-http','within-deadline','after-deadline']:assert started.wait(15),'actual model request never reached HTTP fixture'
   elif flow=='terminal-grace':
    for n in range(400):
     if (output/'results.json').exists():break
     time.sleep(.05)
    else:raise AssertionError('engine never wrote terminal result')
-  else:time.sleep(1)
   results[flow]=asyncio.run(receive(port,output));print(flow,results[flow],flush=True)
   if flow=='during-http':release.set()
   if flow in ['within-deadline','after-deadline']:
