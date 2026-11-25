@@ -1,5 +1,5 @@
 import json, io, os
-os.chdir('/tmp/kaz')
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def text(path):
     return open(path, encoding='utf-8').read()
@@ -137,9 +137,6 @@ config_props = {
     "creditEpsilonPerMille": intprop(4, 0, 999,
         "The whole per-seat kill-credit range, in permille. 4 is deliberately "
         "smaller than one extra team kill (1/180 = 5.6 permille)."),
-    "model": {"type": "string", "default": "",
-              "description": "Pinned Bedrock/Anthropic model; empty = auto."},
-    "maxOutputTokens": intprop(900, 1, 8192),
 }
 
 seat_arr = lambda t, d: {"type": "array", "items": {"type": t}, "minItems": 4,
@@ -209,11 +206,11 @@ cert_config = {
     "maxTicks": 600,
     "maxGames": 2,
     "turnTicks": 96,
-    "turnBudgetMs": 7000,
-    "attempt1Ms": 4500,
+    "turnBudgetMs": 15000,
+    "attempt1Ms": 15000,
     "retryMs": 2000,
     "turnSpacingMs": 0,
-    "wallClockBudgetSeconds": 180,
+    "wallClockBudgetSeconds": 240,
     "lobbyJoinTimeoutTicks": 1440,
     "startWaitTicks": 0,
     "gameOverTicks": 24,
@@ -233,15 +230,15 @@ manifest = {
         "owner": "daveey",
         "description": (
             "Four-seat cooperative horde defence. Two knights and two archers "
-            "hold one gate against a marching horde of the dead; one breach, "
-            "or one hero death, ends the wave for everybody. A policy is a "
-            "prompt."),
+            "hold one gate against a marching horde. Every player receives a "
+            "private observation and submits a squad directive. Scripted and "
+            "prompt policies run in player containers; the game owns rules, "
+            "validation, actuator masks, results, and replay."),
         "replay_viewer": {"bundle": "static-replay-viewer"},
         "runnable": {
             "type": "game",
             "image": "{{KNIGHTS_ARCHERS_IMAGE}}",
             "run": ["/bin/knights-archers"],
-            "env": {},
             "source_url":
                 "https://github.com/softmax-universe/cogame-knights-archers/tree/main",
         },
@@ -287,6 +284,7 @@ manifest = {
             "run": ["/bin/knights-archers-player"],
             "env": {
                 "COWORLD_LLM_ENABLED": "true",
+                "COWORLD_LLM_MODEL": "anthropic/claude-haiku-4.5",
                 "PLAYER_PROMPT": (
                     "Hold the gate line. Coordinate targets with your squad; "
                     "archers stay outside zombie reach."),
@@ -318,7 +316,12 @@ manifest = {
     ],
     "variants": variants,
     "certification": {
-        "players": [{"player_id": "baseline"} for _ in range(4)],
+        "players": [
+            {"player_id": "prompt"},
+            {"player_id": "baseline"},
+            {"player_id": "baseline"},
+            {"player_id": "baseline"},
+        ],
         "game_config": cert_config,
     },
 }

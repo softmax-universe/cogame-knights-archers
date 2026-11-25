@@ -45,8 +45,10 @@ block numAgentsIsFourEverywhere:
   check(not cert["game_config"].hasKey("tokens"),
     "the cert fixture must not carry runner-managed tokens")
   ## The first declared player is the native model player (`COWORLD_LLM_ENABLED=true`,
-  ## no `PLAYER_SCRIPTED`), and `baseline` is declared separately for purely scripted
-  ## offline certification.
+  ## default `COWORLD_LLM_MODEL`, no `PLAYER_SCRIPTED`), and `baseline` is declared
+  ## separately. Release certification seats the native model player at seat 0 and
+  ## covers every declared player ID (`players-run` requires every declared player
+  ## to occupy at least one certification seat).
   check(manifest["player"].len >= 2, "manifest must declare model and scripted players")
   let firstPlayer = manifest["player"][0]
   check(firstPlayer["id"].getStr() == "prompt",
@@ -54,17 +56,26 @@ block numAgentsIsFourEverywhere:
   check(firstPlayer["env"].hasKey("COWORLD_LLM_ENABLED") and
         firstPlayer["env"]["COWORLD_LLM_ENABLED"].getStr() == "true",
     "first manifest player must set COWORLD_LLM_ENABLED=true")
+  check(firstPlayer["env"].hasKey("COWORLD_LLM_MODEL") and
+        firstPlayer["env"]["COWORLD_LLM_MODEL"].getStr() == "anthropic/claude-haiku-4.5",
+    "first manifest player must set default COWORLD_LLM_MODEL")
   check(not firstPlayer["env"].hasKey("PLAYER_SCRIPTED"),
     "native model player must not set PLAYER_SCRIPTED")
   var declared: seq[string]
   for player in manifest["player"]:
     declared.add(player["id"].getStr())
   check("baseline" in declared, "manifest must declare explicit scripted baseline player")
+  check(cert["players"][0]["player_id"].getStr() == firstPlayer["id"].getStr(),
+    "certification seat 0 must run the native model player")
   for slot in cert["players"]:
     let id = slot["player_id"].getStr()
     check(id in declared, "certification player " & id & " is not declared")
-    check(id == "baseline",
-      "offline certification must use purely scripted baseline seats, got " & id)
+  for id in declared:
+    var seated = false
+    for slot in cert["players"]:
+      if slot["player_id"].getStr() == id:
+        seated = true
+    check(seated, "declared player " & id & " occupies no certification slot")
 
 block theUploadContractHolds:
   check(manifest.hasKey("$schema"), "the manifest needs $schema")
@@ -200,8 +211,11 @@ block theCertFixtureFitsTheCertifyTimeout:
   ## a handful of wall seconds.
   check(cfg["maxTicks"].getInt() * cfg["maxGames"].getInt() >= 24 * 30,
     "the fixture must outlast a 30 s viewer soak")
+  check(cfg["attempt1Ms"].getInt() >= 10000 and
+        cfg["turnBudgetMs"].getInt() >= cfg["attempt1Ms"].getInt(),
+    "the certification fixture must give real model inference a reasonable timeout")
   check(cfg["turnSpacingMs"].getInt() == 0,
-    "the credential-free fixture pays no rate floor")
+    "the certification fixture pays no extra turn spacing")
   check(cfg["wallClockBudgetSeconds"].getInt() <= 300,
     "the fixture must settle well inside the certify timeout")
 

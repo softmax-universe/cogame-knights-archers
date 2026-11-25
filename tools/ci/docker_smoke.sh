@@ -159,14 +159,33 @@ with open(os.path.join(work, "config.json"), "w") as fh:
 
 by_id = {p.get("id"): p for p in (manifest.get("player") or [])}
 extra_env = [kv for kv in (os.environ.get("SMOKE_EXTRA_ENV") or "").split() if "=" in kv]
+override_ids = [s.strip() for s in (os.environ.get("SMOKE_PLAYER_IDS") or "").split(",") if s.strip()]
+has_llm_endpoint = bool((os.environ.get("COWORLD_LLM_ENDPOINT") or "").strip())
 
 for slot in range(seats):
-    player_id = cert_players[slot].get("player_id") if slot < len(cert_players) else None
+    if override_ids:
+        player_id = override_ids[slot % len(override_ids)]
+    else:
+        player_id = cert_players[slot].get("player_id") if slot < len(cert_players) else None
     entry = by_id.get(player_id) or {}
+    entry_env = entry.get("env") or {}
+    is_llm_entry = (
+        str(entry_env.get("COWORLD_LLM_ENABLED") or "").strip().lower() in ("1", "true", "yes")
+        or bool(entry_env.get("PLAYER_PROMPT"))
+    )
+    if is_llm_entry and not has_llm_endpoint and not override_ids and "baseline" in by_id:
+        print(
+            f"slot {slot}: offline smoke without COWORLD_LLM_ENDPOINT; "
+            f"nominating scripted player_id=baseline instead of {player_id}"
+        )
+        player_id = "baseline"
+        entry = by_id[player_id]
+        entry_env = entry.get("env") or {}
+        is_llm_entry = False
     env_args = []
-    for key, value in (entry.get("env") or {}).items():
+    for key, value in entry_env.items():
         env_args += ["-e", f"{key}={value}"]
-    if (entry.get("env") or {}).get("PLAYER_PROMPT"):
+    if is_llm_entry:
         for key in ["COWORLD_LLM_ENDPOINT", "COWORLD_LLM_MODEL", "COWORLD_LLM_TEMPERATURE"]:
             if key in os.environ:
                 env_args += ["-e", f"{key}={os.environ[key]}"]

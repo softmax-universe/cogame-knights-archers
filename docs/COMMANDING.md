@@ -11,8 +11,10 @@ coworld upload-policy coworld-knights-archers:latest \
   --secret-env PLAYER_PROMPT="<your strategy, in plain English>"
 ```
 
+Set `COWORLD_LLM_ENABLED=true` (with optional `COWORLD_LLM_MODEL`, defaulting to
+`anthropic/claude-haiku-4.5`, and `PLAYER_PROMPT`) to run the native model player.
 `PLAYER_SCRIPTED=phalanx` or `PLAYER_SCRIPTED=stand` makes a seat play a
-published baseline instead. A seat that sets neither plays `phalanx`.
+published baseline instead. A seat that sets none of these plays `phalanx`.
 
 ## What the model is asked
 

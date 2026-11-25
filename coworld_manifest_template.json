@@ -34,6 +34,27 @@
         "players"
       ],
       "properties": {
+        "promptVariant": {
+          "type": "string",
+          "enum": [
+            "canonical",
+            "plain",
+            "numbered",
+            "questions",
+            "reordered",
+            "heldout-briefing",
+            "heldout-reference",
+            "mixed"
+          ],
+          "default": "canonical",
+          "description": "Episode-stable rules wording; held-out wordings are evaluation only."
+        },
+        "promptSeed": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Independent prompt seed; mixed requires an explicit value."
+        },
         "tokens": {
           "type": "array",
           "items": {
@@ -162,7 +183,7 @@
           "default": 9000,
           "minimum": 0,
           "maximum": 60000,
-          "description": "Wall-clock floor between batch STARTS; holds four seats under the Bedrock sidecar's 30 req/min per-episode cap."
+          "description": "Wall-clock floor between batch STARTS; holds four seats under the configured 30 req/min per-episode model budget."
         },
         "wallClockBudgetSeconds": {
           "type": "integer",
@@ -404,27 +425,6 @@
           "minimum": 0,
           "maximum": 999,
           "description": "The whole per-seat kill-credit range, in permille. 4 is deliberately smaller than one extra team kill (1/180 = 5.6 permille)."
-        },
-        "promptVariant": {
-          "type": "string",
-          "enum": [
-            "canonical",
-            "plain",
-            "numbered",
-            "questions",
-            "reordered",
-            "heldout-briefing",
-            "heldout-reference",
-            "mixed"
-          ],
-          "default": "canonical",
-          "description": "Episode-stable rules wording; held-out wordings are evaluation only."
-        },
-        "promptSeed": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 0,
-          "description": "Independent prompt seed; mixed requires an explicit value."
         }
       }
     },
@@ -634,7 +634,7 @@
           "title": "Rules",
           "content": {
             "type": "text",
-            "value": "# Knights Archers Zombies — rules\n\nFour heroes hold one gate against a rising horde, and a single mistake ends the\nwave for everybody.\n\n## The board\n\nA fixed **1235 × 659** arena (`mapPath: \"arena\"`), 24 ticks per second. The dead\nwalk in at the **breach** on the east edge (`x = 1178`) and march west toward the\n**gate** on the west edge (`x = 40`). Both are baked into the floor art, so the\ngeometry of the game is legible with the HUD off.\n\n## The seats\n\n`num_agents` is **4**. One seat drives exactly one hero.\n\n| Seat | Alias — the only name the game uses | Role | Weapon |\n|---|---|---|---|\n| 0 | `KNIGHT-alpha` | knight | mace |\n| 1 | `KNIGHT-beta` | knight | mace |\n| 2 | `ARCHER-alpha` | archer | bow |\n| 3 | `ARCHER-beta` | archer | bow |\n\n| | Knight | Archer |\n|---|---|---|\n| speed | 66 px/s | 56 px/s (85 %) |\n| reach | 52 px, ±45° wedge, line of sight required | 528 px, straight |\n| damage | 2 — one blow kills | 1 — two arrows kill |\n| swing / shot period | 0.92 s (18-tick cooldown after the 4-tick swing) | 0.5 s |\n\nThere is **no friendly fire**: arrows pass through heroes.\n\n## The horde\n\nZombies enter on a ramping schedule — 0.29/s at the start of a wave rising to\n1.20/s after 80 s, about **79 zombies** over a full wave, never more than 40\nalive at once. Each has **2 hit points** and walks at **36 px/s** down a flow\nfield toward the gate. A zombie with a living hero inside **90 px** stops\nmarching and charges it. Zombies do not collide with each other.\n\n## Losing\n\nThe wave ends **the instant**:\n\n1. a zombie's centre reaches `x <= 40` — a **breach**; or\n2. a zombie's centre comes within **26 px** of any living hero — a **casualty**.\n\nThere are no respawns, no second chances, and no hit-point pool: `hitPoints` 1,\n`lives` 1. A hero who is not you dying ends your wave too.\n\n## Winning\n\nAn episode is **two waves** of 2304 ticks (96 s). Surviving a whole wave\n**clears** it.\n\n```\nkills      = every zombie the four of you killed, over the episode\ncleared    = waves that ran their full 96 s with the line intact (0, 1 or 2)\nteamValue  = kills + 20 * cleared\nteamScore  = min(teamValue, 180) / 180                 -- the same for ALL FOUR\ncredit[s]  = 0.004 * kills[s] / max(1, kills)          -- the tie-break only\nscores[s]  = teamScore + credit[s]\nwin[s]     = teamScore >= 0.5\n```\n\nScores share a team component plus personal kill credit. The credit range (0.004) is\n**smaller than one extra team kill** (1/180 = 0.005556), so killing more than\nyour share is worth nothing if the line breaks.\n\n## The published scripted baselines\n\nBoth emit the same directive object an LLM does, on the same 4.0 s cadence.\nThey are published so that \"cooperating with a partner you did not write\" here\nmeans \"a partner whose rules you know\".\n\n- **`phalanx`** — the certification player, the per-turn fallback, the driver of\n  a seat that never connects, and the default. It ranks the live zombies by gate\n  distance and divides them so two seats never duplicate work: KNIGHT-alpha\n  intercepts the leader, KNIGHT-beta the second, ARCHER-alpha focuses the leader\n  and ARCHER-beta the third. An archer with anything inside 150 px falls back\n  toward the gate for a turn; a knight with four bodies inside 90 px gives 140 px\n  of ground for a turn. With no zombies alive everybody holds the choke —\n  knights at `[560, 240]` and `[560, 420]`, archers at `[300, 240]` and\n  `[300, 420]`.\n- **`stand`** — deliberately weaker and different in shape: every hero holds its\n  choke post for the whole wave and never moves. It kills whatever walks into\n  reach and leaks everything that walks around it.\n\n`tools/tune_baselines.nim` is the grid harness that chose `phalanx`'s three\nnumbers; `tools/tune_baselines --check` re-plays them in CI.\n\n## Orders\n\nEvery 4 seconds each seat issues ONE order for its own hero and a deterministic\ncontroller executes it for the next 4 seconds. See\n[COMMANDING.md](COMMANDING.md) for the schema and\n[PROTOCOL.md](PROTOCOL.md) for the wire.\n\n| intent | what the controller does |\n|---|---|\n| `intercept` | meet the zombie closest to the gate and kill it |\n| `hold` | stand at `target` and kill whatever walks into reach |\n| `screen` | stand 120 px in front of the leader, between it and the gate |\n| `focus` | attack the zombie nearest `target` |\n| `fall_back` | walk to `target` and do not attack |\n| `regroup` | move to the middle of your surviving squadmates |\n"
+            "value": "# Knights Archers Zombies — rules\n\nFour heroes hold one gate against a rising horde, and a single mistake ends the\nwave for everybody.\n\n## The board\n\nA fixed **1235 × 659** arena (`mapPath: \"arena\"`), 24 ticks per second. The dead\nwalk in at the **breach** on the east edge (`x = 1178`) and march west toward the\n**gate** on the west edge (`x = 40`). Both are baked into the floor art, so the\ngeometry of the game is legible with the HUD off.\n\n## The seats\n\n`num_agents` is **4**. One seat drives exactly one hero.\n\n| Seat | Alias — the only name the game uses | Role | Weapon |\n|---|---|---|---|\n| 0 | `KNIGHT-alpha` | knight | mace |\n| 1 | `KNIGHT-beta` | knight | mace |\n| 2 | `ARCHER-alpha` | archer | bow |\n| 3 | `ARCHER-beta` | archer | bow |\n\n| | Knight | Archer |\n|---|---|---|\n| speed | 66 px/s | 56 px/s (85 %) |\n| reach | 52 px, ±45° wedge, line of sight required | 528 px, straight |\n| damage | 2 — one blow kills | 1 — two arrows kill |\n| swing / shot period | 0.92 s (18-tick cooldown after the 4-tick swing) | 0.5 s |\n\nThere is **no friendly fire**: arrows pass through heroes.\n\n## The horde\n\nZombies enter on a ramping schedule — 0.29/s at the start of a wave rising to\n1.20/s after 80 s, about **79 zombies** over a full wave, never more than 40\nalive at once. Each has **2 hit points** and walks at **36 px/s** down a flow\nfield toward the gate. A zombie with a living hero inside **90 px** stops\nmarching and charges it. Zombies do not collide with each other.\n\n## Losing\n\nThe wave ends **the instant**:\n\n1. a zombie's centre reaches `x <= 40` — a **breach**; or\n2. a zombie's centre comes within **26 px** of any living hero — a **casualty**.\n\nThere are no respawns, no second chances, and no hit-point pool: `hitPoints` 1,\n`lives` 1. A hero who is not you dying ends your wave too.\n\n## Winning\n\nAn episode is **two waves** of 2304 ticks (96 s). Surviving a whole wave\n**clears** it.\n\n```\nkills      = every zombie the four of you killed, over the episode\ncleared    = waves that ran their full 96 s with the line intact (0, 1 or 2)\nteamValue  = kills + 20 * cleared\nteamScore  = min(teamValue, 180) / 180                 -- the same for ALL FOUR\ncredit[s]  = 0.004 * kills[s] / max(1, kills)          -- the tie-break only\nscores[s]  = teamScore + credit[s]\nwin[s]     = teamScore >= 0.5\n```\n\nScores share a team component plus personal kill credit. The credit range (0.004) is\n**smaller than one extra team kill** (1/180 = 0.005556), so killing more than\nyour share is worth nothing if the line breaks.\n\n## The published scripted baselines\n\nBoth emit the same directive object an LLM does, on the same 4.0 s cadence.\nThey are published so that \"cooperating with a partner you did not write\" here\nmeans \"a partner whose rules you know\".\n\n- **`phalanx`** — the bundled scripted baseline (`baseline`), the driver of a\n  seat that never connects, and the default when neither `COWORLD_LLM_ENABLED=true`,\n  `PLAYER_PROMPT`, nor `PLAYER_SCRIPTED` is set. It ranks the live zombies by gate\n  distance and divides them so two seats never duplicate work: KNIGHT-alpha\n  intercepts the leader, KNIGHT-beta the second, ARCHER-alpha focuses the leader\n  and ARCHER-beta the third. An archer with anything inside 150 px falls back\n  toward the gate for a turn; a knight with four bodies inside 90 px gives 140 px\n  of ground for a turn. With no zombies alive everybody holds the choke —\n  knights at `[560, 240]` and `[560, 420]`, archers at `[300, 240]` and\n  `[300, 420]`.\n- **`stand`** — deliberately weaker and different in shape: every hero holds its\n  choke post for the whole wave and never moves. It kills whatever walks into\n  reach and leaks everything that walks around it.\n\n`tools/tune_baselines.nim` is the grid harness that chose `phalanx`'s three\nnumbers; `tools/tune_baselines --check` re-plays them in CI.\n\n## Orders\n\nEvery 4 seconds each seat issues ONE order for its own hero and a deterministic\ncontroller executes it for the next 4 seconds. See\n[COMMANDING.md](COMMANDING.md) for the schema and\n[PROTOCOL.md](PROTOCOL.md) for the wire.\n\n| intent | what the controller does |\n|---|---|\n| `intercept` | meet the zombie closest to the gate and kill it |\n| `hold` | stand at `target` and kill whatever walks into reach |\n| `screen` | stand 120 px in front of the leader, between it and the gate |\n| `focus` | attack the zombie nearest `target` |\n| `fall_back` | walk to `target` and do not attack |\n| `regroup` | move to the middle of your surviving squadmates |\n"
           }
         },
         {
@@ -650,7 +650,7 @@
           "title": "Writing a knights-archers prompt",
           "content": {
             "type": "text",
-            "value": "# Writing a knights-archers prompt\n\nA player policy receives its own private decision view and returns one ordinary\nsquad directive. The same player image supports scripted and prompt\npolicies. Model calls happen inside the player container.\n\n```bash\ncoworld upload-policy coworld-knights-archers:latest \\\n  --name my-warden \\\n  --run /bin/knights-archers-player \\\n  --secret-env PLAYER_PROMPT=\"<your strategy, in plain English>\"\n```\n\n`PLAYER_SCRIPTED=phalanx` or `PLAYER_SCRIPTED=stand` makes a seat play a\npublished baseline instead. A seat that sets neither plays `phalanx`.\n\n## What the model is asked\n\nOnce every 4 seconds of sim time, the game sends all four seats their private\nobservations from one pre-action state. A prompt player combines its own\n`PLAYER_PROMPT`, the rules for its role, and that observation before calling\nClaude. No seat sees another's current-turn order or operator prompt.\n\n## What it must answer\n\n```json\n{\"note\": \"archers hold the choke, I take the north lane\",\n \"cogs\": [{\"id\": \"KNIGHT-alpha\", \"intent\": \"intercept\", \"target\": [820, 300],\n           \"face\": [900, 290], \"say\": \"north\"}]}\n```\n\n| field | cap / rule | default / bounds |\n|---|---|---|\n| `note` | optional string, ≤ 160 runes | defaults to `\"\"`; truncated on a rune boundary; newlines collapse |\n| `cogs` | required array with exactly 1 entry — your own hero | wrong length or non-array is rejected |\n| `cogs[].id` | required exact match to your own alias | wrong or missing id is rejected |\n| `cogs[].intent` | required; exact one of `intercept` `hold` `screen` `focus` `fall_back` `regroup` | unknown or non-exact intent is rejected |\n| `cogs[].target` | required `[x, y]` pair of finite JSON numbers | clamped to the map box; missing or malformed is rejected |\n| `cogs[].face` | optional `[x, y]` pair of finite JSON numbers, or `null` | defaults to `null` (controller aims); clamped to the map box; malformed is rejected |\n| `cogs[].say` | optional string, ≤ 10 runes | defaults to `\"\"`; truncated, then printable-ASCII filtered. It is a REAL in-game shout every hero within 247 px hears. |\n\nParsing is strict: reply with exactly one JSON object, either bare or inside a\nsingle outer Markdown code fence (` ``` ` or ` ```json `). Surrounding prose,\nextra JSON objects, legacy wrapper shapes, unknown fields, and invalid field\nvalues are rejected. Each model decision gets one attempt; any missing,\ntimed-out, infrastructure-failed, or invalid reply records the failure cause\nand terminates the interrupted episode unscored rather than substituting a\nscripted or idle move.\n\n## What actually wins\n\n- **The line, not the kill count.** A cleared wave is worth 20 kills, and a wave\n  that ends at 0:08 to a careless knight banks whatever it had. Your score is\n  the squad's score.\n- **Distance is the archer's whole role.** A zombie inside 90 px charges, and it\n  covers 144 px inside one turn. An archer that walks toward its target is\n  usually walking into the thing that kills it.\n- **A knight is not invulnerable.** It kills once every 0.9 seconds and dies to\n  one touch. Three bodies at once is a losing trade even for a mace.\n- **Say what you are about to do.** All four decide simultaneously, so `say` is\n  the only way two seats avoid taking the same zombie.\n\nThe two shipped champions are worked examples:\n\n- **`knights-archers-warden`** holds a LINE and never chases. Lanes are split by\n  y; knights intercept the leader in their own half; archers focus from 300–450\n  px and fall back the moment anything is inside 200 px.\n- **`knights-archers-volley`** kills the leader first, together: both archers\n  focus the same zombie every turn (two arrows in one second is a kill; two\n  arrows on two zombies is two wounded zombies), while the knights screen it.\n"
+            "value": "# Writing a knights-archers prompt\n\nA player policy receives its own private decision view and returns one ordinary\nsquad directive. The same player image supports scripted and prompt\npolicies. Model calls happen inside the player container.\n\n```bash\ncoworld upload-policy coworld-knights-archers:latest \\\n  --name my-warden \\\n  --run /bin/knights-archers-player \\\n  --secret-env PLAYER_PROMPT=\"<your strategy, in plain English>\"\n```\n\nSet `COWORLD_LLM_ENABLED=true` (with optional `COWORLD_LLM_MODEL`, defaulting to\n`anthropic/claude-haiku-4.5`, and `PLAYER_PROMPT`) to run the native model player.\n`PLAYER_SCRIPTED=phalanx` or `PLAYER_SCRIPTED=stand` makes a seat play a\npublished baseline instead. A seat that sets none of these plays `phalanx`.\n\n## What the model is asked\n\nOnce every 4 seconds of sim time, the game sends all four seats their private\nobservations from one pre-action state. A prompt player combines its own\n`PLAYER_PROMPT`, the rules for its role, and that observation before calling\nClaude. No seat sees another's current-turn order or operator prompt.\n\n## What it must answer\n\n```json\n{\"note\": \"archers hold the choke, I take the north lane\",\n \"cogs\": [{\"id\": \"KNIGHT-alpha\", \"intent\": \"intercept\", \"target\": [820, 300],\n           \"face\": [900, 290], \"say\": \"north\"}]}\n```\n\n| field | cap / rule | default / bounds |\n|---|---|---|\n| `note` | optional string, ≤ 160 runes | defaults to `\"\"`; truncated on a rune boundary; newlines collapse |\n| `cogs` | required array with exactly 1 entry — your own hero | wrong length or non-array is rejected |\n| `cogs[].id` | required exact match to your own alias | wrong or missing id is rejected |\n| `cogs[].intent` | required; exact one of `intercept` `hold` `screen` `focus` `fall_back` `regroup` | unknown or non-exact intent is rejected |\n| `cogs[].target` | required `[x, y]` pair of finite JSON numbers | clamped to the map box; missing or malformed is rejected |\n| `cogs[].face` | optional `[x, y]` pair of finite JSON numbers, or `null` | defaults to `null` (controller aims); clamped to the map box; malformed is rejected |\n| `cogs[].say` | optional string, ≤ 10 runes | defaults to `\"\"`; truncated, then printable-ASCII filtered. It is a REAL in-game shout every hero within 247 px hears. |\n\nParsing is strict: reply with exactly one JSON object, either bare or inside a\nsingle outer Markdown code fence (` ``` ` or ` ```json `). Surrounding prose,\nextra JSON objects, legacy wrapper shapes, unknown fields, and invalid field\nvalues are rejected. Each model decision gets one attempt; any missing,\ntimed-out, infrastructure-failed, or invalid reply records the failure cause\nand terminates the interrupted episode unscored rather than substituting a\nscripted or idle move.\n\n## What actually wins\n\n- **The line, not the kill count.** A cleared wave is worth 20 kills, and a wave\n  that ends at 0:08 to a careless knight banks whatever it had. Your score is\n  the squad's score.\n- **Distance is the archer's whole role.** A zombie inside 90 px charges, and it\n  covers 144 px inside one turn. An archer that walks toward its target is\n  usually walking into the thing that kills it.\n- **A knight is not invulnerable.** It kills once every 0.9 seconds and dies to\n  one touch. Three bodies at once is a losing trade even for a mace.\n- **Say what you are about to do.** All four decide simultaneously, so `say` is\n  the only way two seats avoid taking the same zombie.\n\nThe two shipped champions are worked examples:\n\n- **`knights-archers-warden`** holds a LINE and never chases. Lanes are split by\n  y; knights intercept the leader in their own half; archers focus from 300–450\n  px and fall back the moment anything is inside 200 px.\n- **`knights-archers-volley`** kills the leader first, together: both archers\n  focus the same zombie every turn (two arrows in one second is a kill; two\n  arrows on two zombies is two wounded zombies), while the knights screen it.\n"
           }
         }
       ]
@@ -658,11 +658,19 @@
   },
   "player": [
     {
+      "id": "prompt",
       "type": "player",
+      "name": "Prompt Reference",
+      "description": "Claude prompt policy over the private kaz.player.v2 observation and ordinary squad directive.",
       "image": "{{KNIGHTS_ARCHERS_IMAGE}}",
       "run": [
         "/bin/knights-archers-player"
       ],
+      "env": {
+        "COWORLD_LLM_ENABLED": "true",
+        "COWORLD_LLM_MODEL": "anthropic/claude-haiku-4.5",
+        "PLAYER_PROMPT": "Hold the gate line. Coordinate targets with your squad; archers stay outside zombie reach."
+      },
       "source_url": "https://github.com/softmax-universe/cogame-knights-archers/tree/main",
       "resources": {
         "requests": {
@@ -672,13 +680,6 @@
         "limits": {
           "cpu": "1"
         }
-      },
-      "id": "prompt",
-      "name": "Prompt Reference",
-      "description": "Claude prompt policy over the private kaz.player.v2 observation and ordinary squad directive.",
-      "env": {
-        "COWORLD_LLM_ENABLED": "true",
-        "PLAYER_PROMPT": "Hold the gate line. Coordinate targets with your squad; archers stay outside zombie reach."
       }
     },
     {
@@ -1078,7 +1079,7 @@
   "certification": {
     "players": [
       {
-        "player_id": "baseline"
+        "player_id": "prompt"
       },
       {
         "player_id": "baseline"
@@ -1135,11 +1136,11 @@
       "maxTicks": 600,
       "maxGames": 2,
       "turnTicks": 96,
-      "turnBudgetMs": 7000,
-      "attempt1Ms": 4500,
+      "turnBudgetMs": 15000,
+      "attempt1Ms": 15000,
       "retryMs": 2000,
       "turnSpacingMs": 0,
-      "wallClockBudgetSeconds": 180,
+      "wallClockBudgetSeconds": 240,
       "lobbyJoinTimeoutTicks": 1440,
       "startWaitTicks": 0,
       "gameOverTicks": 24,
