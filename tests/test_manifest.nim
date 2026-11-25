@@ -44,11 +44,32 @@ block numAgentsIsFourEverywhere:
     "certification.game_config.players must name four seats")
   check(not cert["game_config"].hasKey("tokens"),
     "the cert fixture must not carry runner-managed tokens")
-  ## Every DECLARED player must occupy a certification slot (the raid 0.1.2
-  ## `players_missing` scar).
+  ## The first declared player is the native model player (`COWORLD_LLM_ENABLED=true`,
+  ## default `COWORLD_LLM_MODEL`, no `PLAYER_SCRIPTED`), and `baseline` is declared
+  ## separately. Release certification seats the native model player at seat 0 and
+  ## covers every declared player ID (`players-run` requires every declared player
+  ## to occupy at least one certification seat).
+  check(manifest["player"].len >= 2, "manifest must declare model and scripted players")
+  let firstPlayer = manifest["player"][0]
+  check(firstPlayer["id"].getStr() == "prompt",
+    "first manifest player must be the native model player")
+  check(firstPlayer["env"].hasKey("COWORLD_LLM_ENABLED") and
+        firstPlayer["env"]["COWORLD_LLM_ENABLED"].getStr() == "true",
+    "first manifest player must set COWORLD_LLM_ENABLED=true")
+  check(firstPlayer["env"].hasKey("COWORLD_LLM_MODEL") and
+        firstPlayer["env"]["COWORLD_LLM_MODEL"].getStr() == "anthropic/claude-haiku-4.5",
+    "first manifest player must set default COWORLD_LLM_MODEL")
+  check(not firstPlayer["env"].hasKey("PLAYER_SCRIPTED"),
+    "native model player must not set PLAYER_SCRIPTED")
   var declared: seq[string]
   for player in manifest["player"]:
     declared.add(player["id"].getStr())
+  check("baseline" in declared, "manifest must declare explicit scripted baseline player")
+  check(cert["players"][0]["player_id"].getStr() == firstPlayer["id"].getStr(),
+    "certification seat 0 must run the native model player")
+  for slot in cert["players"]:
+    let id = slot["player_id"].getStr()
+    check(id in declared, "certification player " & id & " is not declared")
   for id in declared:
     var seated = false
     for slot in cert["players"]:
@@ -190,10 +211,25 @@ block theCertFixtureFitsTheCertifyTimeout:
   ## a handful of wall seconds.
   check(cfg["maxTicks"].getInt() * cfg["maxGames"].getInt() >= 24 * 30,
     "the fixture must outlast a 30 s viewer soak")
+  check(not cfg.hasKey("attempt1Ms") and not cfg.hasKey("retryMs"),
+    "the certification fixture must not carry stale attempt/retry fields")
+  check(cfg["turnBudgetMs"].getInt() >= 10000,
+    "the certification fixture must give real model inference a reasonable timeout")
   check(cfg["turnSpacingMs"].getInt() == 0,
-    "the credential-free fixture pays no rate floor")
+    "the certification fixture pays no extra turn spacing")
   check(cfg["wallClockBudgetSeconds"].getInt() <= 300,
     "the fixture must settle well inside the certify timeout")
+  ## Verify the real config parser/validator accepts every variant and the
+  ## certification fixture after runner token injection.
+  for variant in manifest["variants"]:
+    var vcfg = copy(variant["game_config"])
+    vcfg["tokens"] = %*["t0", "t1", "t2", "t3"]
+    var parsed = defaultGameConfig()
+    parsed.update($vcfg)
+  var ccfg = copy(cfg)
+  ccfg["tokens"] = %*["t0", "t1", "t2", "t3"]
+  var parsedCert = defaultGameConfig()
+  parsedCert.update($ccfg)
 
 block theScaffoldIsPresentAndExecutable:
   for path in ["tools/ci/docker_smoke.sh", "tools/build_replay_viewer.sh"]:

@@ -73,8 +73,9 @@ Both emit the same directive object an LLM does, on the same 4.0 s cadence.
 They are published so that "cooperating with a partner you did not write" here
 means "a partner whose rules you know".
 
-- **`phalanx`** — the certification player, the per-turn fallback, the driver of
-  a seat that never connects, and the default. It ranks the live zombies by gate
+- **`phalanx`** — the bundled scripted baseline (`baseline`), the driver of a
+  seat that never connects, and the default when neither `COWORLD_LLM_ENABLED=true`,
+  `PLAYER_PROMPT`, nor `PLAYER_SCRIPTED` is set. It ranks the live zombies by gate
   distance and divides them so two seats never duplicate work: KNIGHT-alpha
   intercepts the leader, KNIGHT-beta the second, ARCHER-alpha focuses the leader
   and ARCHER-beta the third. An archer with anything inside 150 px falls back

@@ -1279,17 +1279,24 @@ proc buildRewardPacket(sim: SimServer): string {.measure.} =
       result.addStatLine("deaths", identity, account.deaths)
       result.addStatLine("captures", identity, account.captures)
 
-proc declarePlayerFailure(slot: int, message: string) =
+proc declarePlayerFailure(
+  slot: int, message: string, cause = "", failureKind = ""
+) =
   ## Publishes the game-declared terminal player failure the platform runner
   ## polls for (COGAME_PLAYER_FAILURE_URI -> player_failure.json), so a lobby
-  ## no-show or mid-form drop is charged to the seat that caused it instead of
-  ## poisoning the whole episode unattributed. Best-effort: the abort that
-  ## follows must never be masked by a declaration write failure, and outside
-  ## the platform (env unset) this is a no-op.
+  ## no-show or failed model decision is charged to the seat that caused it
+  ## instead of poisoning the whole episode unattributed. Best-effort: the
+  ## abort that follows must never be masked by a declaration write failure,
+  ## and outside the platform (env unset) this is a no-op.
   try:
+    var payload = %*{"failed_policy_index": slot, "message": message}
+    if cause.len > 0:
+      payload["cause"] = %cause
+    if failureKind.len > 0:
+      payload["failure_kind"] = %failureKind
     writeCogameEnv(
       "COGAME_PLAYER_FAILURE_URI",
-      $(%*{"failed_policy_index": slot, "message": message}),
+      $payload,
       "application/json"
     )
   except CatchableError as e:
@@ -1462,10 +1469,14 @@ proc runServerLoop*(
     engine =
       if squadMode: initDecisionEngine(sim, selection) else: DecisionEngine()
     squadsBuilt = false
-    squadForceStart = false
     lastTurnKey = -1
     episodeStart = getMonoTime()
     deadlineHit = false
+    abortedUnscored = false
+    abortedSeat = -1
+    abortedCause = ""
+    abortedKind = ""
+    abortedDetail = ""
     liveOverlays: seq[DebugOverlay] = @[]
     prevInputs: seq[InputState]
     liveSpeedIndex = config.liveSpeedIndex()
@@ -1710,19 +1721,22 @@ proc runServerLoop*(
             sim.removePlayer(websocket)
             socketsToClose.add(websocket)
         if squadMode and not squadsBuilt and sim.lobbyJoinTimedOut():
-          # A seat that never connects does NOT end the episode. Report the
-          # no-show to the platform (lowest missing slot only), then start
-          # anyway: that seat's hero runs the published `phalanx` baseline for
-          # the whole episode and both waves play out.
+          # A seat that never connects terminates the episode unscored rather
+          # than substituting a fake scripted seat.
           let stuckSlot = sim.nextPlayerSlot()
-          declarePlayerFailure(
-            stuckSlot,
-            "player slot " & $stuckSlot & " never joined the lobby within " &
-              $sim.config.lobbyJoinTimeoutTicks & " lobby ticks (~" &
-              $(sim.config.lobbyJoinTimeoutTicks div TargetFps) &
-              "s); its hero plays the phalanx baseline"
-          )
-          squadForceStart = true
+          let detail = "player slot " & $stuckSlot & " never joined the lobby within " &
+            $sim.config.lobbyJoinTimeoutTicks & " lobby ticks (~" &
+            $(sim.config.lobbyJoinTimeoutTicks div TargetFps) & "s)"
+          declarePlayerFailure(stuckSlot, detail, cause = "no_show",
+            failureKind = FailureKindInfra)
+          abortedUnscored = true
+          abortedSeat = stuckSlot
+          abortedCause = "no_show"
+          abortedKind = FailureKindInfra
+          abortedDetail = detail
+          sim.endReason = ReasonFault
+          sim.endRule = EndRuleHostError
+          quitAfterFrame = true
         if not replayLoaded and not squadMode and sim.lobbyJoinTimedOut():
           # Joins are strictly slot-sequential, so the seat the lobby is stuck
           # waiting on is exactly nextPlayerSlot(). Declare it before dying so
@@ -1820,8 +1834,8 @@ proc runServerLoop*(
           # trusted joins. The cogs carry ONLY their anonymous aliases, so the
           # replay's join stream leaks no policy identity; the real names ride
           # in the config JSON and in the redacted `register` records.
-          if squadMode and not squadsBuilt and sim.phase == Lobby and
-              (sim.players.len >= config.numAgents or squadForceStart):
+          if squadMode and not squadsBuilt and not abortedUnscored and
+              sim.phase == Lobby and sim.players.len >= config.numAgents:
             for order in sim.players.len ..< sim.totalCogs():
               try:
                 discard sim.addPlayer(
@@ -2101,7 +2115,7 @@ proc runServerLoop*(
     #  so the wasm viewer re-derives the whole match from them without ever
     #  running either.
     # ------------------------------------------------------------------
-    if squadMode and squadsBuilt and sim.phase == Playing:
+    if squadMode and squadsBuilt and not abortedUnscored and sim.phase == Playing:
       let
         elapsedSeconds = (getMonoTime() - episodeStart).inSeconds.int
         turnTicks = max(1, config.turnTicks)
@@ -2120,59 +2134,70 @@ proc runServerLoop*(
         if capture.isSome: capture.get().beginTurn(engine, sim, observationHash)
         for record in records:
           replayWriter.writeChat(tickTime(sim.tickCount), 0, record)
-        for seat in 0 ..< engine.directives.len:
-          if not engine.haveDirective[seat]:
-            continue
-          let directive = engine.directives[seat]
-          case directive.source
-          of dsLlm: inc sim.llmTurns[min(seat, sim.llmTurns.high)]
-          of dsFallback: inc sim.fallbackTurns[min(seat, sim.fallbackTurns.high)]
-          of dsScripted: discard
-          let record = directive.boundedDirectiveRecord(
-            sim.gameIndex + 1, turnIndex, seat,
-            sim.cogAlias(seat), sim.roleForSeat(seat))
-          replayWriter.writeChat(tickTime(sim.tickCount), seat, record)
-          sim.pushFeedDirective(record)
-          sim.emitEvent(
-            Directive, source = seat, weapon = $directive.source,
-            amount = turnIndex, content = directive.note)
-          # A cog's `say` is a REAL in-game shout: hashed state both sides
-          # hear, so it is written to the replay chat stream by cog index and
-          # re-applied identically at playback.
-          for order in directive.orders:
-            if order.say.len == 0:
+        if engine.failed:
+          declarePlayerFailure(
+            engine.failedSeat,
+            engine.failureKind & ":" & engine.failureCause & ": " & engine.failureDetail,
+            cause = engine.failureCause,
+            failureKind = engine.failureKind
+          )
+          abortedUnscored = true
+          abortedSeat = engine.failedSeat
+          abortedCause = engine.failureCause
+          abortedKind = engine.failureKind
+          abortedDetail = engine.failureDetail
+          sim.endReason = ReasonFault
+          sim.endRule = EndRuleHostError
+          quitAfterFrame = true
+        else:
+          for seat in 0 ..< engine.directives.len:
+            if not engine.haveDirective[seat]:
               continue
-            if sim.applyShout(order.cogIndex, order.say):
-              replayWriter.writeChat(
-                tickTime(sim.tickCount), order.cogIndex, order.say)
-      # Compile one mask per COG, in index order, every tick.
-      inputs = newSeq[InputState](sim.players.len)
-      for cogIndex in 0 ..< sim.players.len:
-        let seat = sim.cogSeat(cogIndex)
-        var order: CogOrder
-        var found = false
-        if sim.seatCommands(seat, cogIndex) and seat < engine.directives.len and
-            engine.haveDirective[seat]:
-          for candidate in engine.directives[seat].orders:
-            if candidate.cogIndex == cogIndex:
-              order = candidate
-              found = true
-              break
-        if not found:
-          # This hero's seat has no directive yet (turn 0, or a seat that has
-          # not registered). It plays the published `phalanx` baseline, which
-          # is what "adapt to a partner you know the rules of" means here.
-          let scripted = engine.phalanxFor(sim, @[cogIndex])
-          if scripted.orders.len > 0:
-            order = scripted.orders[0]
-            found = true
-        if not found:
-          continue
-        let mask = engine.ctl.compileMask(sim, order, cogIndex)
-        inputs[cogIndex] = decodeInputMask(mask)
-        replayWriter.writeInputMaskChange(
-          tickTime(sim.tickCount), cogIndex, mask)
-      downInputs = inputs
+            let directive = engine.directives[seat]
+            case directive.source
+            of dsLlm: inc sim.llmTurns[min(seat, sim.llmTurns.high)]
+            of dsFallback: inc sim.fallbackTurns[min(seat, sim.fallbackTurns.high)]
+            of dsScripted: discard
+            let record = directive.boundedDirectiveRecord(
+              sim.gameIndex + 1, turnIndex, seat,
+              sim.cogAlias(seat), sim.roleForSeat(seat))
+            replayWriter.writeChat(tickTime(sim.tickCount), seat, record)
+            sim.pushFeedDirective(record)
+            sim.emitEvent(
+              Directive, source = seat, weapon = $directive.source,
+              amount = turnIndex, content = directive.note)
+            # A cog's `say` is a REAL in-game shout: hashed state both sides
+            # hear, so it is written to the replay chat stream by cog index and
+            # re-applied identically at playback.
+            for order in directive.orders:
+              if order.say.len == 0:
+                continue
+              if sim.applyShout(order.cogIndex, order.say):
+                replayWriter.writeChat(
+                  tickTime(sim.tickCount), order.cogIndex, order.say)
+      if not abortedUnscored:
+        # Compile one mask per COG, in index order, every tick.
+        inputs = newSeq[InputState](sim.players.len)
+        for cogIndex in 0 ..< sim.players.len:
+          let seat = sim.cogSeat(cogIndex)
+          var order: CogOrder
+          var found = false
+          if sim.seatCommands(seat, cogIndex) and seat < engine.directives.len and
+              engine.haveDirective[seat]:
+            for candidate in engine.directives[seat].orders:
+              if candidate.cogIndex == cogIndex:
+                order = candidate
+                found = true
+                break
+          if not found:
+            replayWriter.writeInputMaskChange(
+              tickTime(sim.tickCount), cogIndex, 0)
+            continue
+          let mask = engine.ctl.compileMask(sim, order, cogIndex)
+          inputs[cogIndex] = decodeInputMask(mask)
+          replayWriter.writeInputMaskChange(
+            tickTime(sim.tickCount), cogIndex, mask)
+        downInputs = inputs
     elif squadMode and squadsBuilt and sim.players.len > 0:
       # NOT playing (the lobby between the two games of an episode, or the
       # game-over hold): the server steps with all-zero inputs, so the replay
@@ -2191,7 +2216,7 @@ proc runServerLoop*(
         replaySeekTicks,
         replayCommands
       )
-    else:
+    elif not abortedUnscored:
       for command in replayCommands:
         liveSpeedIndex.applySpeedCommand(command)
       var
@@ -2343,7 +2368,7 @@ proc runServerLoop*(
       finishProfileTrace()
 
     if quitAfterFrame:
-      if squadMode:
+      if squadMode and not abortedUnscored:
         # The `result` control record: the full results document, written once
         # into the replay chat stream at episode end (docs/PROTOCOL.md record
         # table), so a paintball replay is self-sufficient — the outcome would
@@ -2367,15 +2392,28 @@ proc runServerLoop*(
         echo "Events written: ", eventsPath,
           " (", collectedEvents.len, " events, ", getFileSize(eventsPath), " bytes)"
       if capture.isSome:
-        capture.get().finishMatch(sim)
+        if abortedUnscored:
+          capture.get().finishAborted(
+            sim, abortedSeat, abortedKind, abortedCause, abortedDetail)
+        else:
+          capture.get().finishMatch(sim)
         capture.get().trajectory.writeEventsToUri(trajectoryUri)
-      if runtimeConfig.resultsUri.len > 0:
-        let scoresJson = sim.playerResultsJson() & "\n"
-        runtimeConfig.writeResults(scoresJson)
-      elif saveScoresPath.len > 0:
-        writeFile(saveScoresPath, sim.playerResultsJson() & "\n")
-        echo "Scores written: ", saveScoresPath,
-          " (", getFileSize(saveScoresPath), " bytes)"
+      # Players share the terminal state before publishing the results to the runner.
+      let terminalFrame = $(%*{"type": "final",
+        "status": (if abortedUnscored: "unscored" else: "complete")})
+      for socket in sockets:
+        try:
+          socket.send(terminalFrame)
+        except CatchableError:
+          discard
+      if not abortedUnscored:
+        if runtimeConfig.resultsUri.len > 0:
+          let scoresJson = sim.playerResultsJson() & "\n"
+          runtimeConfig.writeResults(scoresJson)
+        elif saveScoresPath.len > 0:
+          writeFile(saveScoresPath, sim.playerResultsJson() & "\n")
+          echo "Scores written: ", saveScoresPath,
+            " (", getFileSize(saveScoresPath), " bytes)"
       block:
         let framesTotal = serverMetrics.frames[SkippedFrame] +
           serverMetrics.frames[WaitedFrame] + serverMetrics.frames[LateFrame]
@@ -2408,7 +2446,7 @@ proc runServerLoop*(
             serverMetrics.metricsJson(sim, sim.tickCount) & "\n")
           echo "Metrics written: ", metricsPath,
             " (", getFileSize(metricsPath), " bytes)"
-      if squadMode:
+      if squadMode and not abortedUnscored:
         # Bounded shutdown grace: the certification runner pings /healthz and
         # /global AFTER the player pods start, and a short squad episode can
         # already have written its artifacts by then. Keep answering for a
@@ -2421,6 +2459,10 @@ proc runServerLoop*(
           sleep(200)
       httpServer.close()
       joinThread(serverThread)
+      if abortedUnscored:
+        echo "knights-archers: episode terminated unscored (seat=", abortedSeat,
+          " kind=", abortedKind, " cause=", abortedCause, "): ", abortedDetail
+        quit(1)
       break
 
     let frameAdvance = runFrameLimiter(

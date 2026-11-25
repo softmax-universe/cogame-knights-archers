@@ -22,7 +22,7 @@ proc newMatchCapture*(episodeId, gameVersion, sourceRevision: string, seed: int)
 proc flushTurn*(capture: MatchCapture, endTick: int, terminal = false) =
   if capture.pending:
     for seat, physical in capture.physical:
-      doAssert endTick > physical.startTick
+      doAssert endTick >= physical.startTick
       doAssert physical.masks.len == endTick - physical.startTick
       doAssert physical.hashes.len == endTick - physical.startTick
       let issued = capture.decisions[seat]
@@ -66,3 +66,24 @@ proc finishMatch*(capture: MatchCapture, sim: SimServer) =
     participants.add(%*{"seat": $seat, "score": results["scores"][seat],
       "win": results["win"][seat], "kills": results["kills"][seat]})
   capture.trajectory.finish(status, results, participants)
+
+proc finishAborted*(
+  capture: MatchCapture,
+  sim: SimServer,
+  failedSeat: int,
+  failureKind, cause, detail: string
+) =
+  ## Closes an interrupted episode unscored with explicit failure evidence and
+  ## no invented numeric scores or winners.
+  capture.flushTurn(sim.tickCount, true)
+  let outcome = %*{
+    "reason": "failed",
+    "failure_kind": failureKind,
+    "cause": cause,
+    "failed_seat": failedSeat,
+    "detail": detail,
+    "finalTick": sim.tickCount,
+    "seed": sim.config.seed,
+    "engine_version": GameVersion
+  }
+  capture.trajectory.finish(esFailed, outcome, newJArray())

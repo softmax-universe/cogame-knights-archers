@@ -69,8 +69,6 @@ proc defaultGameConfig*(): GameConfig =
     regimes: @[regimeResident],
     turnTicks: DefaultTurnTicks,
     turnBudgetMs: DefaultTurnBudgetMs,
-    attempt1Ms: DefaultAttempt1Ms,
-    retryMs: DefaultRetryMs,
     turnSpacingMs: DefaultTurnSpacingMs,
     wallClockBudgetSeconds: DefaultWallClockBudgetSeconds,
     model: "",
@@ -740,25 +738,10 @@ proc validate(config: GameConfig) =
       KazError, "Config field regimes must have 1..4 entries.")
   if config.turnTicks < 1:
     raise newException(KazError, "Config field turnTicks must be at least 1.")
-  if config.turnBudgetMs < 1 or config.attempt1Ms < 1 or config.retryMs < 1:
-    raise newException(
-      KazError, "Config LLM deadline fields must be positive.")
-  if config.attempt1Ms + config.retryMs > config.turnBudgetMs:
+  if config.turnBudgetMs < 1000:
     raise newException(
       KazError,
-      "Config fields attempt1Ms + retryMs must fit inside turnBudgetMs."
-    )
-  if config.attempt1Ms < 1000 or config.retryMs < 1000:
-    ## v1.1 timing amendment: curly passes the deadline to CURLOPT_TIMEOUT,
-    ## which is WHOLE SECONDS, and the turn loop floors the conversion. A
-    ## sub-second value is therefore not the deadline it claims to be —
-    ## `attempt1Ms: 4500` ran with 4 s against a 4618 ms sidecar median and
-    ## every successful call landed on 3999–4001 ms.
-    raise newException(
-      KazError,
-      "Config fields attempt1Ms and retryMs must be at least 1000 ms " &
-      "(multiples of 1000): curly's transport timeout has whole-second " &
-      "granularity, so anything else is silently floored."
+      "Config field turnBudgetMs must be at least 1000 ms."
     )
   if config.turnSpacingMs < 0:
     raise newException(
@@ -959,8 +942,6 @@ proc update*(config: var GameConfig, jsonText: string) =
   node.readConfigInt("sprayDamage", config.sprayDamage)
   node.readConfigInt("turnTicks", config.turnTicks)
   node.readConfigInt("turnBudgetMs", config.turnBudgetMs)
-  node.readConfigInt("attempt1Ms", config.attempt1Ms)
-  node.readConfigInt("retryMs", config.retryMs)
   node.readConfigInt("turnSpacingMs", config.turnSpacingMs)
   node.readConfigInt("wallClockBudgetSeconds", config.wallClockBudgetSeconds)
   node.readConfigString("model", config.model)
@@ -1147,8 +1128,6 @@ proc configJson*(config: GameConfig): string =
     node["paintHealTicks"] = %config.paintHealTicks
     node["turnTicks"] = %config.turnTicks
     node["turnBudgetMs"] = %config.turnBudgetMs
-    node["attempt1Ms"] = %config.attempt1Ms
-    node["retryMs"] = %config.retryMs
     node["turnSpacingMs"] = %config.turnSpacingMs
     node["wallClockBudgetSeconds"] = %config.wallClockBudgetSeconds
     node["maxOutputTokens"] = %config.maxOutputTokens

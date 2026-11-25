@@ -49,7 +49,7 @@ exchanges private JSON decision frames with the game:
 
    ```json
    {"type":"decision","protocol":"kaz.player.v2","id":100000,
-    "slot":0,"attempt":1,"timeout_ms":4500,"view":{...}}
+    "slot":0,"attempt":1,"timeout_ms":7000,"view":{...}}
    ```
 
    The `view` is the existing private `seatViewJson`: own hero, visible horde,
@@ -67,11 +67,14 @@ exchanges private JSON decision frames with the game:
    ```
 
    With no credential, a model player returns `source:"fallback"` and
-   `cause:"no_credentials"`. The game validates and repairs directives, then
-   compiles them to actuator masks. Missing or invalid replies get one retry
-   and then the game-owned `phalanx` fallback. Both attempts share the turn's
-   seven-second budget. The replay records the accepted directive and masks,
-   never a model request or secret.
+   `cause:"no_credentials"`. The game validates directives strictly with one
+   attempt per model decision, then compiles accepted directives to actuator
+   masks. Any missing, timed-out, infrastructure-failed, or invalid model reply
+   records a `fallback` diagnostic and `COGAME_PLAYER_FAILURE_URI` cause, and
+   terminates the interrupted episode unscored (no `COGAME_RESULTS_URI` score
+   document is written and no scripted or idle move is substituted). The replay
+   records the accepted directives, masks, and failure diagnostic, never a
+   model request or secret.
 
 Every hero, every zombie and every arrow appears in every seat's frame:
 `fogOfWar` is false in every shipped variant.
@@ -124,3 +127,5 @@ key for key (that schema is `additionalProperties: false`).
 The ten seat-indexed arrays have exactly `num_agents` entries. `reason` is one
 of `complete`, `deadline`, `fault`; `endRule` one of `full_time`, `breach`,
 `casualty`, `wall_clock`, `sim_fault`, `host_error`.
+
+When the episode ends, the server sends a final JSON text frame with type `final` and status `complete` or `unscored`. The player exits when it receives this frame.

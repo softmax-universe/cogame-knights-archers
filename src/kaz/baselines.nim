@@ -43,11 +43,9 @@ const
     ## board and it arrives with the horde behind it.
 
 proc parseBaseline*(text: string): Baseline =
-  ## PLAYER_SCRIPTED values. Anything unrecognised is `phalanx`: a seat that
-  ## says nothing useful still plays the published default rather than sitting
-  ## out.
+  ## PLAYER_SCRIPTED values: `stand` or `phalanx` (default).
   case text.strip().toLowerAscii()
-  of "stand", "standing", "hold": blStand
+  of "stand": blStand
   else: blPhalanx
 
 proc rankedZombies*(sim: SimServer): seq[int] =

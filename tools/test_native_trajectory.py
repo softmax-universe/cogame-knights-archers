@@ -18,7 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 GAME, PLAYER = (str(Path(arg).resolve()) for arg in sys.argv[1:3])
 flows = (
     "accepted",
+    "fenced",
     "invalid",
+    "ambiguous",
     "sampled",
     "greedy-null",
     "greedy-tokens",
@@ -27,6 +29,14 @@ flows = (
     "timeout",
     "malformed-wire",
 )
+failing_flows = {
+    "invalid",
+    "ambiguous",
+    "provider-error",
+    "malformed-200",
+    "timeout",
+    "malformed-wire",
+}
 selected_flows = (sys.argv[4],) if len(sys.argv) == 5 else flows
 assert all(flow in flows for flow in selected_flows)
 for flow in selected_flows:
@@ -52,7 +62,14 @@ for flow in selected_flows:
                     }
                 ],
             }
-            text = "private-invalid-response" if flow == "invalid" and slot == 0 else json.dumps(action)
+            if flow == "invalid" and slot == 0:
+                text = "private-invalid-response"
+            elif flow == "ambiguous" and slot == 0:
+                text = json.dumps(action) + " " + json.dumps(action)
+            elif flow == "fenced":
+                text = "```json\n" + json.dumps(action) + "\n```"
+            else:
+                text = json.dumps(action)
             if flow == "timeout" and slot == 0:
                 timeout_requests.append(request)
                 time.sleep(8)
@@ -133,9 +150,7 @@ for flow in selected_flows:
             "maxTicks": 240,
             "turnTicks": 120,
             "startWaitTicks": 4,
-            "turnBudgetMs": 2500,
-            "attempt1Ms": 1500,
-            "retryMs": 1000,
+            "turnBudgetMs": 1500,
             "turnSpacingMs": 0,
             "lobbyJoinTimeoutTicks": 720,
             "minPlayers": 4,
@@ -150,6 +165,7 @@ for flow in selected_flows:
             "COGAME_PORT": str(port),
             "COGAME_CONFIG_URI": (output / "config.json").as_uri(),
             "COGAME_RESULTS_URI": (output / "results.json").as_uri(),
+            "COGAME_PLAYER_FAILURE_URI": (output / "player_failure.json").as_uri(),
             "COGAME_SAVE_REPLAY_URI": (output / "replay.bitreplay").as_uri(),
             "COGAME_SAVE_TRAJECTORY_URI": (output / "trajectory.jsonl").as_uri(),
             "COWORLD_EPISODE_ID": str(uuid.uuid4()),
@@ -185,14 +201,44 @@ for flow in selected_flows:
                     os.environ["COWORLD_TEST_MALFORMED_PLAYER"] if flow == "malformed-wire" and slot == 0 else PLAYER
                 )
                 processes.append(subprocess.Popen([binary], cwd=ROOT, env=player_env, stdout=log, stderr=log))
-            for process in processes:
-                assert process.wait(timeout=90) == 0
+            game_exit = processes[0].wait(timeout=90)
+            for process in processes[1:]:
+                if process.poll() is None:
+                    try:
+                        process.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        process.terminate()
+                        process.wait(timeout=5)
             for log in logs:
                 log.flush()
             events = [json.loads(line) for line in (output / "trajectory.jsonl").read_text().splitlines()]
             decisions, episode = events[:-1], events[-1]
-            assert episode["status"] == "completed" and episode["outcome"]["reason"] == "complete"
-            assert len(decisions) == 8
+            is_failing = flow in failing_flows
+            if is_failing:
+                assert game_exit != 0, f"{flow} must exit non-zero, got {game_exit}"
+                assert not (output / "results.json").exists(), f"{flow} must not write numeric results.json"
+                failure_doc = json.loads((output / "player_failure.json").read_text())
+                assert failure_doc["failed_policy_index"] == 0
+                expected_kind = "infrastructure" if flow in {"provider-error", "timeout"} else "invalid_action"
+                assert failure_doc["failure_kind"] == expected_kind, failure_doc
+                assert episode["status"] == "failed" and episode["outcome"]["reason"] == "failed"
+                assert "scores" not in episode["outcome"] and "win" not in episode["outcome"]
+                assert "teamScore" not in episode["outcome"]
+                assert episode["participant_outcomes"] == []
+                assert episode["outcome"]["failed_seat"] == 0
+                assert episode["outcome"]["failure_kind"] == expected_kind
+                assert len(decisions) == 4
+            else:
+                assert game_exit == 0, f"{flow} must exit 0, got {game_exit}"
+                assert (output / "results.json").exists()
+                assert not (output / "player_failure.json").exists()
+                results_doc = json.loads((output / "results.json").read_text())
+                assert results_doc["reason"] == "complete" and len(results_doc["scores"]) == 4
+                assert sum(results_doc["llmTurns"]) >= 4
+                for player in processes[1:]:
+                    assert player.wait(timeout=10) == 0, "player did not honor the terminal frame"
+                assert episode["status"] == "completed" and episode["outcome"]["reason"] == "complete"
+                assert len(decisions) == 8
             assert episode["game_version"] == "fixture-package-0.1.4"
             assert episode["outcome"]["engine_version"] == "1"
             assert (output / "trajectory.jsonl").stat().st_mode & 0o777 == 0o600
@@ -203,7 +249,11 @@ for flow in selected_flows:
                 physical = decision["observation"]["execution"]
                 assert physical["control_encoding"] == "sprite-one-u8" and physical["tick_hz"] == 24
                 duration = physical["end_tick"] - physical["start_tick"]
-                assert duration > 0 and len(base64.b64decode(physical["seat_input_masks_b64"])) == duration
+                if is_failing:
+                    assert duration == 0
+                else:
+                    assert duration > 0
+                assert len(base64.b64decode(physical["seat_input_masks_b64"])) == duration
                 assert len(physical["post_tick_hashes"]) == duration
                 for attempt in decision["attempts"]:
                     assert attempt["inference_mode"] == "text_action"
@@ -268,10 +318,18 @@ for flow in selected_flows:
                 "private-malformed-provider",
             ):
                 assert secret not in public
-            if flow in {"invalid", "malformed-200", "timeout", "malformed-wire"}:
-                assert any(d["action_status"] == "fallback" and len(d["attempts"]) == 2 for d in decisions)
-            if flow == "provider-error":
-                assert any(d["action_status"] == "fallback" and len(d["attempts"]) == 1 for d in decisions)
+            if flow in {"invalid", "ambiguous", "malformed-200", "malformed-wire"}:
+                assert any(
+                    d["seat"] == "0" and d["action_status"] == "rejected"
+                    and d["executed_action"] is None and len(d["attempts"]) == 1
+                    for d in decisions
+                )
+            if flow in {"timeout", "provider-error"}:
+                assert any(
+                    d["seat"] == "0" and d["action_status"] == "missing"
+                    and d["executed_action"] is None and len(d["attempts"]) == 1
+                    for d in decisions
+                )
             if flow == "malformed-wire":
                 assert all(
                     a["origin"] == "model" and a["platform_call_id"] is not None

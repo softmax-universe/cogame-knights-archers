@@ -5,8 +5,6 @@
   "maxGames": 2,
   "turnTicks": 96,
   "turnBudgetMs": 7000,
-  "attempt1Ms": 4500,
-  "retryMs": 2000,
   "turnSpacingMs": 9000,
   "wallClockBudgetSeconds": 690,
   "lobbyJoinTimeoutTicks": 2400,

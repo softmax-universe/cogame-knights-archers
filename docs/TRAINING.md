@@ -50,7 +50,7 @@ Omit `--language` for the 537-feature numeric task with seven action heads. Mett
 
 The game owns acceptance, fallback, and executed actions. Player evidence cannot assert teacher or human provenance. Model replies must independently parse to the submitted directive. Engine repairs exclude that attempt from targets.
 
-Native inference uses only `COWORLD_LLM_ENDPOINT`; retired Anthropic and Bedrock credentials cannot enable a request. Native players send private attempt-start and received-response frames before their final action. The game retains timeout, malformed response, rejected, and sampled attempts. Exact received header maps and provider request IDs remain private. Sampling outputs are recorded as evidence, never as unsent decoder controls. Platform call IDs come from `X-Softmax-Llm-Call-Id`. Local fixture IDs are not hosted archive evidence. Socket receipt timestamps enforce the exact engine deadline, including while public views render. HTTP transport timeouts round upward to whole seconds without extending engine acceptance or retry budgets.
+Native inference uses only `COWORLD_LLM_ENDPOINT`; retired Anthropic and Bedrock credentials cannot enable a request. Native players send private attempt-start and received-response frames before their final action. The game retains timeout, malformed response, rejected, and sampled attempts. Exact received header maps and provider request IDs remain private. Sampling outputs are recorded as evidence, never as unsent decoder controls. Platform call IDs come from `X-Softmax-Llm-Call-Id`. Local fixture IDs are not hosted archive evidence. Socket receipt timestamps enforce the exact engine deadline, including while public views render. HTTP transport timeouts round upward to whole seconds without extending the engine acceptance deadline.
 
 Set `COGAME_SAVE_TRAJECTORY_URI` for private capture. The reviewed runtime must supply `COWORLD_EPISODE_ID`, `COWORLD_GAME_VERSION`, and `COWORLD_SOURCE_REVISION`. The game version is the published package version; `outcome.engine_version` identifies internal rules. Release uploads remain blocked until that runtime is deployed and verified.
 
@@ -68,7 +68,7 @@ Teacher prompts and actions consume only the ordinary private view. Hidden seed/
 
 Existing pre-modernization exports and optimizer reports remain historical evidence at source `a0c9f1c1786b6a70b502a6acb1d246da563f26d4`. They do not certify this source edition or deployed runtime. Fresh canonical exports use new directories.
 
-The existing native HTTP-fixture harness exercises mixed wording, retries,
+The existing native HTTP-fixture harness exercises mixed wording,
 provider failures, and private capture using its short protocol episode:
 
 ```sh

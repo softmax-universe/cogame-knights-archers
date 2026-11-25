@@ -8,13 +8,12 @@
 ## one after another would quadruple the wall clock for no gain. An episode has
 ## at most 4 x 48 = 192 player decisions, at most 4 in flight.
 ##
-## DEGRADE, NEVER HANG. Every wait here is bounded: attempt 1 gets
-## `attempt1Ms`, the single retry gets `retryMs`, and the whole turn is
-## wrapped in a monotonic `turnBudgetMs` deadline. A provider throttle with no
-## player can report a fallback immediately. On a second failure the seat plays
-## the `phalanx` scripted directive for that turn and a `fallback` record names
-## the cause. No failure mode leaves a hero unactuated: the control layer
-## always has a directive — this turn's, else last turn's, else `phalanx`'s.
+## DEGRADE, NEVER HANG. Every wait here is bounded: each model decision gets
+## one parallel attempt within `turnBudgetMs`. A provider
+## throttle, credential-free player, timeout, transport error, or invalid/
+## unparseable directive records the failure cause immediately without
+## substituting a scripted or idle move; the host terminates the interrupted
+## episode unscored.
 ##
 ## THE RATE FLOOR. Hosted inference can cap requests per minute per episode, and
 ## four seats per turn would exceed that at any fast cadence. A
@@ -26,6 +25,16 @@ import
   bitworld/decision_trajectory,
   sim, control, directives, baselines, llm
 export prompts
+
+const
+  FailureKindInfra* = "infrastructure"
+  FailureKindInvalidAction* = "invalid_action"
+
+proc failureKindFor*(cause: string): string =
+  if cause in ["no_credentials", "throttled", "transport_error", "timeout", "budget_guard"]:
+    FailureKindInfra
+  else:
+    FailureKindInvalidAction
 
 type
   TurnDecision* = object
@@ -52,7 +61,12 @@ type
     haveDirective*: seq[bool]
     lastBatchStart*: MonoTime
     batchStarted*: bool
-    llmOff*: bool              ## the budget guard fired; scripted from here on
+    llmOff*: bool              ## the budget guard fired; model episode cannot continue
+    failed*: bool              ## true when a model seat failed on the current turn
+    failedSeat*: int
+    failureCause*: string
+    failureKind*: string
+    failureDetail*: string
     records*: seq[string]      ## chat records queued for the replay writer
     ## The counters as they stood when the PREVIOUS turn was issued. The seat
     ## view's `last_turn` block is the difference, which is the one thing a
@@ -73,6 +87,7 @@ proc initDecisionEngine*(sim: SimServer, selection: PromptSelection): DecisionEn
   result.seats = newSeq[SeatPolicy](sim.seatCount())
   result.directives = newSeq[SquadDirective](sim.seatCount())
   result.haveDirective = newSeq[bool](sim.seatCount())
+  result.failedSeat = -1
   for i in 0 ..< result.seats.len:
     result.seats[i].baseline = blPhalanx
     result.seats[i].label = "phalanx"
@@ -328,39 +343,6 @@ proc phalanxFor*(
   for cogIndex in cogs:
     result.orders.add(scriptedDirective(sim.policyView(cogIndex), blPhalanx).orders)
 
-proc repairMissingOrders*(
-  engine: DecisionEngine, sim: SimServer, seat: int,
-  directive: var SquadDirective
-) =
-  ## Design §Reply schema, the `cogs` row: "an empty or missing array keeps
-  ## last turn's directive, else `phalanx`'s". The parser fills an unnamed
-  ## entry with `intercept` at the gate centre so no hero is ever left
-  ## unactuated; that default is a floor, not the rule.
-  var previous: seq[CogOrder]
-  if seat < engine.haveDirective.len and engine.haveDirective[seat]:
-    previous = engine.directives[seat].orders
-  var
-    phalanx: SquadDirective
-    builtPhalanx = false
-  for order in directive.orders.mitems:
-    if order.fromReply:
-      continue
-    var repaired = false
-    for old in previous:
-      if old.cogIndex == order.cogIndex:
-        order = old                  ## last turn's directive for this cog
-        repaired = true
-        break
-    if repaired:
-      continue
-    if not builtPhalanx:
-      phalanx = engine.phalanxFor(sim, sim.commandedCogs(seat))
-      builtPhalanx = true
-    for fallback in phalanx.orders:
-      if fallback.cogIndex == order.cogIndex:
-        order = fallback             ## else phalanx's
-        break
-
 proc turn*(
   engine: var DecisionEngine,
   sim: SimServer,
@@ -369,61 +351,69 @@ proc turn*(
   exchange: DecisionExchange
 ): seq[string] =
   ## Runs ONE decision turn and installs each seat's directive. Returns the
-  ## replay chat records this turn produced. Invalid or missing player replies
-  ## end in a legal directive.
+  ## replay chat records this turn produced. Any failed model decision sets
+  ## `engine.failed = true` with cause/kind/seat so the host terminates the
+  ## interrupted episode unscored without substituting a scripted or idle move.
   let
     wave = sim.gameIndex + 1
     budget = initDuration(milliseconds = max(1, sim.config.turnBudgetMs))
 
-  # --- budget guard: settle EARLY rather than overrun -----------------------
+  engine.failed = false
+  engine.failedSeat = -1
+  engine.failureCause = ""
+  engine.failureKind = ""
+  engine.failureDetail = ""
+
+  proc recordFailure(engine: var DecisionEngine, seat: int, cause, detail: string) =
+    if not engine.failed:
+      engine.failed = true
+      engine.failedSeat = seat
+      engine.failureCause = cause
+      engine.failureKind = failureKindFor(cause)
+      engine.failureDetail = detail
+
+  # --- budget guard: interrupt rather than overrun or substitute ------------
   # If two more full turns would not fit inside the engine's own wall-clock
-  # stop, switch the LLM off for the rest of the episode and finish on the
-  # scripted layer (microseconds per turn), so the episode ends
-  # complete/full_time instead of deadline.
-  if not engine.llmOff:
+  # stop, do not substitute scripted or idle moves for model seats.
+  var hasLlmSeat = false
+  for seat in 0 ..< engine.seats.len:
+    if engine.seats[seat].isLlm:
+      hasLlmSeat = true
+      break
+  if hasLlmSeat and not engine.llmOff:
     let turnSeconds = (sim.config.turnBudgetMs + sim.config.turnSpacingMs + 999) div 1000
     if elapsedSeconds + 2 * turnSeconds > sim.config.wallClockBudgetSeconds:
       engine.llmOff = true
       result.add(budgetGuardRecord(
         turnIndex, max(0, sim.config.wallClockBudgetSeconds - elapsedSeconds)))
       echo "knights-archers: budget guard fired at turn ", turnIndex,
-        "; remaining turns play scripted"
+        "; interrupting episode unscored"
 
   var views = newSeq[JsonNode](engine.seats.len)
   engine.decisions = newSeq[TurnDecision](engine.seats.len)
   for seat in 0 ..< engine.seats.len:
     views[seat] = parseJson(engine.seatViewJson(sim, seat, turnIndex, turnsPerGame))
     engine.decisions[seat] = TurnDecision(observation: copy(views[seat]),
-      executedAction: newJNull(), status: asFallback)
+      executedAction: newJNull(),
+      status: if engine.seats[seat].isLlm: asMissing else: asFallback)
 
     engine.decisions[seat].observation["prompt_selection"] = engine.selection.selectionMetadata()
 
   # --- which seats need a call? --------------------------------------------
   var open: seq[int]
-  var failureCauses = newSeq[string](engine.seats.len)
   for seat in 0 ..< engine.seats.len:
     if engine.seats[seat].isLlm and not engine.llmOff:
-      failureCauses[seat] = "timeout"
+      engine.haveDirective[seat] = false
       open.add(seat)
     elif engine.seats[seat].isLlm:
-      # An LLM seat that CANNOT call the LLM this turn is a fallback, not a
-      # scripted policy, and the design's `fallback.cause` enum names both
-      # reasons it happens (`no_credentials`, `budget_guard`). Recording it is
-      # what makes the two countable: without this an LLM seat with no key
-      # reported llmTurns 0 AND fallbackTurns 0, and replay_summary.py's
-      # `fallbacks` was 0 for an episode in which nothing but fallbacks
-      # happened. A seat that registered as SCRIPTED is not a fallback and
-      # gets no record (which is why certification's two baseline seats write
-      # none).
-      var directive = engine.phalanxFor(sim, sim.commandedCogs(seat))
-      directive.source = dsFallback
-      engine.directives[seat] = directive
-      engine.haveDirective[seat] = true
+      engine.haveDirective[seat] = false
+      engine.decisions[seat].status = asMissing
       let cause = "budget_guard"
-      result.add(fallbackRecord(wave, turnIndex, seat, 1, cause,
-        "the LLM is unavailable for this turn; playing phalanx"))
-      echo "knights-archers llm: seat ", seat, " falling back to phalanx (", cause,
-        ") on turn ", turnIndex
+      let detail = "wall-clock budget guard interrupted model turn"
+      result.add(fallbackRecord(wave, turnIndex, seat, 1, cause, detail))
+      engine.recordFailure(seat, cause, detail)
+      echo "knights-archers llm: seat ", seat, " failed (", cause,
+        ") on turn ", turnIndex, "; episode interrupted"
     else:
       var directive = scriptedDirective(views[seat].policyView(), engine.seats[seat].baseline)
       directive.source = dsScripted
@@ -457,133 +447,118 @@ proc turn*(
 
   # Rate-limit waiting precedes the per-turn inference deadline.
   let turnStart = getMonoTime()
-  # --- up to two PARALLEL batches ------------------------------------------
-  var attempt = 0
-  while open.len > 0 and attempt < 2:
+  # --- one PARALLEL batch per model decision --------------------------------
+  if open.len > 0:
     if getMonoTime() - turnStart >= budget:
       for seat in open:
-        failureCauses[seat] = "timeout"
-        result.add(fallbackRecord(
-          wave, turnIndex, seat, attempt + 1, "timeout",
-          "per-turn budget exhausted before attempt " & $(attempt + 1)))
-      break
-    let remainingMs = (budget - (getMonoTime() - turnStart)).inMilliseconds.int
-    let deadlineMs = min(remainingMs,
-      if attempt == 0: sim.config.attempt1Ms else: sim.config.retryMs)
-    var requests: seq[JsonNode]
-    for seat in open:
-      requests.add(%*{
-        "type": "decision",
-        "protocol": "kaz.player.v2",
-        "id": (sim.gameIndex + 1) * 100_000 + turnIndex * 10 + attempt,
-        "slot": seat,
-        "attempt": attempt + 1,
-        "timeout_ms": deadlineMs,
-        "prompt_configuration": {"promptVariant": $engine.selection.variant, "promptSeed": engine.selection.seed},
-        "view": views[seat]
-      })
-    let started = getMonoTime()
-    let responses = exchange(requests, deadlineMs)
-    let latency = (getMonoTime() - started).inMilliseconds.int
-    var stillOpen: seq[int]
-    for position, seat in open:
-      var cause = "timeout"
-      var evidence = newDecisionAttempt($wave & "-" & $turnIndex & "-" & $seat & "-" & $(attempt + 1),
-        engine.seats[seat].label, aoUnknown)
-      evidence.latencyMs = some(float(latency))
-      try:
-        if responses[position].len == 0:
-          raise newException(ValueError, "player action timed out")
-        cause = "parse_error"
-        let response = parseJson(responses[position])
-        if response.hasKey("training_attempt") and response["training_attempt"].kind != JNull:
-          evidence = readAttemptEvidence(response["training_attempt"])
-          evidence.attemptId = $wave & "-" & $turnIndex & "-" & $seat & "-" & $(attempt + 1)
-          if evidence.origin in {aoTeacher, aoHuman}: evidence.origin = aoUnknown
-        if response["type"].getStr() != "action" or
-            response["protocol"].getStr() != "kaz.player.v2":
-          raise newException(ValueError, "wrong player action protocol")
-        if response["id"].getInt() != requests[position]["id"].getInt():
-          raise newException(ValueError, "player action id mismatch")
-        if response{"source"}.getStr() == "fallback":
-          let reported = response{"cause"}.getStr()
-          let why = if reported in ["no_credentials", "throttled",
-              "transport_error", "timeout", "parse_error"]:
-              reported else: "parse_error"
-          failureCauses[seat] = why
-          result.add(fallbackRecord(wave, turnIndex, seat, attempt + 1,
-            why, "player policy reported fallback"))
-          var fallback = engine.phalanxFor(sim, sim.commandedCogs(seat))
-          fallback.source = dsFallback
-          engine.directives[seat] = fallback
-          engine.haveDirective[seat] = true
-          evidence.rejectionReason = some(if evidence.origin == aoModel and evidence.rawResponse.kind == JNull:
-            "incomplete_native_attempt: " & why & " before HTTP response" else: why)
-          engine.decisions[seat].attempts.add(evidence)
-          if why notin ["no_credentials", "throttled"]: stillOpen.add(seat)
-          continue
-        if response{"source"}.getStr() != "llm":
-          raise newException(ValueError, "player action source must be llm")
-        let commanded = sim.commandedCogs(seat)
-        var ids: seq[string]
-        for cogIndex in commanded:
-          ids.add(sim.cogAlias(cogIndex))
-        let gate = gateCentre(sim)
-        let parsed = parseSquadDirective(
-          response["action"], ids, commanded,
-          gate.x, gate.y, MapWidth - 1, MapHeight - 1)
-        if not parsed.ok: raise newException(DirectiveError, parsed.reason)
-        var directive = parsed.directive
-        let proposal = directive.actionJson()
-        evidence.parsedAction = proposal
-        if evidence.origin == aoModel:
-          let generated = extractJsonObject(evidence.response.getStr())
-          let independentlyParsed = parseSquadDirective(generated, ids, commanded,
-            gate.x, gate.y, MapWidth - 1, MapHeight - 1)
-          if not independentlyParsed.ok: raise newException(DirectiveError, independentlyParsed.reason)
-          evidence.parsedAction = independentlyParsed.directive.actionJson()
-          if evidence.parsedAction != proposal:
-            raise newException(ValueError, "model response differs from submitted directive")
-        directive.source = dsLlm
-        directive.latencyMs = latency
-        engine.repairMissingOrders(sim, seat, directive)
-        if directive.actionJson() == evidence.parsedAction:
+        let detail = "per-turn budget exhausted before attempt 1"
+        result.add(fallbackRecord(wave, turnIndex, seat, 1, "timeout", detail))
+        engine.decisions[seat].status = asMissing
+        engine.recordFailure(seat, "timeout", detail)
+    else:
+      let deadlineMs = max(1, (budget - (getMonoTime() - turnStart)).inMilliseconds.int)
+      var requests: seq[JsonNode]
+      for seat in open:
+        requests.add(%*{
+          "type": "decision",
+          "protocol": "kaz.player.v2",
+          "id": (sim.gameIndex + 1) * 100_000 + turnIndex * 10,
+          "slot": seat,
+          "attempt": 1,
+          "timeout_ms": deadlineMs,
+          "prompt_configuration": {"promptVariant": $engine.selection.variant, "promptSeed": engine.selection.seed},
+          "view": views[seat]
+        })
+      let started = getMonoTime()
+      let responses = exchange(requests, deadlineMs)
+      let latency = (getMonoTime() - started).inMilliseconds.int
+      for position, seat in open:
+        var cause = "timeout"
+        var evidence = newDecisionAttempt($wave & "-" & $turnIndex & "-" & $seat & "-1",
+          engine.seats[seat].label, aoUnknown)
+        evidence.latencyMs = some(float(latency))
+        try:
+          if responses[position].len == 0:
+            raise newException(ValueError, "player action timed out")
+          cause = "parse_error"
+          let response = parseJson(responses[position])
+          if response.hasKey("training_attempt") and response["training_attempt"].kind != JNull:
+            evidence = readAttemptEvidence(response["training_attempt"])
+            evidence.attemptId = $wave & "-" & $turnIndex & "-" & $seat & "-1"
+            if evidence.origin in {aoTeacher, aoHuman}: evidence.origin = aoUnknown
+          if response["type"].getStr() != "action" or
+              response["protocol"].getStr() != "kaz.player.v2":
+            raise newException(ValueError, "wrong player action protocol")
+          if response["id"].getInt() != requests[position]["id"].getInt():
+            raise newException(ValueError, "player action id mismatch")
+          if response{"source"}.getStr() == "fallback":
+            let reported = response{"cause"}.getStr()
+            let why = if reported in ["no_credentials", "throttled",
+                "transport_error", "timeout", "parse_error"]:
+                reported else: "parse_error"
+            let detail = block:
+              let d = response{"detail"}.getStr()
+              if d.len > 0: d else: "player policy reported failure: " & why
+            result.add(fallbackRecord(wave, turnIndex, seat, 1, why, detail))
+            engine.haveDirective[seat] = false
+            engine.decisions[seat].status =
+              if failureKindFor(why) == FailureKindInfra: asMissing else: asRejected
+            evidence.rejectionReason = some(if evidence.origin == aoModel and evidence.rawResponse.kind == JNull:
+              "incomplete_native_attempt: " & why & " before HTTP response" else: why)
+            engine.decisions[seat].attempts.add(evidence)
+            engine.recordFailure(seat, why, detail)
+            echo "knights-archers llm: seat ", seat, " failed (", why,
+              ") on turn ", turnIndex, "; episode interrupted"
+            continue
+          if response{"source"}.getStr() != "llm":
+            raise newException(ValueError, "player action source must be llm")
+          let commanded = sim.commandedCogs(seat)
+          var ids: seq[string]
+          for cogIndex in commanded:
+            ids.add(sim.cogAlias(cogIndex))
+          let parsed = parseSquadDirective(
+            response["action"], ids, commanded,
+            MapWidth - 1, MapHeight - 1)
+          if not parsed.ok: raise newException(DirectiveError, parsed.reason)
+          var directive = parsed.directive
+          let proposal = directive.actionJson()
+          evidence.parsedAction = proposal
+          if evidence.origin == aoModel:
+            let generated = jsonProposal(evidence.response.getStr())
+            if not generated.ok: raise newException(DirectiveError, generated.reason)
+            let independentlyParsed = parseSquadDirective(generated.node, ids, commanded,
+              MapWidth - 1, MapHeight - 1)
+            if not independentlyParsed.ok: raise newException(DirectiveError, independentlyParsed.reason)
+            evidence.parsedAction = independentlyParsed.directive.actionJson()
+            if evidence.parsedAction != proposal:
+              raise newException(ValueError, "model response differs from submitted directive")
+          directive.source = dsLlm
+          directive.latencyMs = latency
           evidence.accepted = true
           engine.decisions[seat].selectedAttemptId = some(evidence.attemptId)
           engine.decisions[seat].status = asAccepted
-        else:
-          directive.source = dsFallback
-          evidence.rejectionReason = some("engine repaired parsed directive")
-        engine.directives[seat] = directive
-        engine.haveDirective[seat] = true
-      except CatchableError as error:
-        failureCauses[seat] = cause
-        result.add(fallbackRecord(
-          wave, turnIndex, seat, attempt + 1, cause, cause))
-        echo "knights-archers llm: seat ", seat, " attempt ", attempt + 1,
-          " failed, falling back if it fails again: ", cause
-        evidence.rejectionReason = some(if evidence.origin == aoModel and evidence.rawResponse.kind == JNull:
-          "incomplete_native_attempt: " & cause & " before HTTP response" else: cause)
-        stillOpen.add(seat)
-      engine.decisions[seat].attempts.add(evidence)
-    open = stillOpen
-    inc attempt
-
-  # --- anything still open plays phalanx for this turn ---------------------
-  for seat in open:
-    var directive = engine.phalanxFor(sim, sim.commandedCogs(seat))
-    directive.source = dsFallback
-    engine.directives[seat] = directive
-    engine.haveDirective[seat] = true
-    let cause = failureCauses[seat]
-    result.add(fallbackRecord(wave, turnIndex, seat, 2, cause,
-      "seat fell back to the phalanx directive"))
-    ## "falling back" is the phrase phase 60 greps the GAME log for.
-    echo "knights-archers llm: seat ", seat, " falling back to phalanx (", cause,
-      ") on turn ", turnIndex
+          engine.directives[seat] = directive
+          engine.haveDirective[seat] = true
+        except CatchableError as error:
+          engine.haveDirective[seat] = false
+          engine.decisions[seat].status =
+            if failureKindFor(cause) == FailureKindInfra: asMissing else: asRejected
+          result.add(fallbackRecord(wave, turnIndex, seat, 1, cause, error.msg))
+          echo "knights-archers llm: seat ", seat, " failed (", cause,
+            ") on turn ", turnIndex, ": ", error.msg
+          evidence.rejectionReason = some(if evidence.origin == aoModel and evidence.rawResponse.kind == JNull:
+            "incomplete_native_attempt: " & cause & " before HTTP response" else: cause)
+          engine.recordFailure(seat, cause, error.msg)
+        engine.decisions[seat].attempts.add(evidence)
 
   for seat in 0 ..< engine.seats.len:
-    engine.decisions[seat].executedAction = engine.directives[seat].actionJson()
+    engine.decisions[seat].executedAction =
+      if not engine.failed and engine.haveDirective[seat]: engine.directives[seat].actionJson()
+      else: newJNull()
+    if engine.failed:
+      engine.decisions[seat].selectedAttemptId = none(string)
+      if engine.decisions[seat].status == asAccepted:
+        engine.decisions[seat].status = asMissing
     var hashes = newJArray()
     for attempt in engine.decisions[seat].attempts:
       if attempt.prompt.kind == JArray and attempt.prompt.len == 2:

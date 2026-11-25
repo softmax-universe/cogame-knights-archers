@@ -26,8 +26,6 @@ proc hordeConfig*(
     "maxGames": maxGames,
     "turnTicks": 96,
     "turnBudgetMs": 7000,
-    "attempt1Ms": 4500,
-    "retryMs": 2000,
     "turnSpacingMs": 0,
     "wallClockBudgetSeconds": 180,
     "lobbyJoinTimeoutTicks": 1440,
