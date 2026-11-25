@@ -43,9 +43,15 @@ def main():
                 for slot, player in enumerate(job.players)
                 if player.env.get("COWORLD_LLM_ENABLED") == "true"
             }
-            run_coworld_episode(job, artifacts, timeout_seconds=timeout,
-                                secret_env={"COWORLD_LLM_ENDPOINT": endpoint},
-                                player_secret_env=model_slots, require_websocket_pong=True)
+            try:
+                run_coworld_episode(job, artifacts, timeout_seconds=timeout,
+                                    secret_env={"COWORLD_LLM_ENDPOINT": endpoint},
+                                    player_secret_env=model_slots, require_websocket_pong=True)
+            except Exception:
+                for path in [artifacts.workspace / "player_failure.json", *sorted(artifacts.logs_dir.glob("*.log"))]:
+                    if path.is_file():
+                        print(path.name, path.read_text(errors="replace")[-1800:], flush=True)
+                raise
 
         result = certify_coworld(args.manifest, timeout_seconds=300, episode_runner=run_roster)
         print(f"Certified {len(result.step_results)} steps; artifacts in {result.artifacts.workspace}")
