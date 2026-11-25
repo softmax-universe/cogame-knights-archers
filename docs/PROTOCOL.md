@@ -127,3 +127,5 @@ key for key (that schema is `additionalProperties: false`).
 The ten seat-indexed arrays have exactly `num_agents` entries. `reason` is one
 of `complete`, `deadline`, `fault`; `endRule` one of `full_time`, `breach`,
 `casualty`, `wall_clock`, `sim_fault`, `host_error`.
+
+When the episode ends, the server sends a final JSON text frame with type `final` and status `complete` or `unscored`. The player exits when it receives this frame.

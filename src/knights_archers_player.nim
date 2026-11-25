@@ -119,6 +119,9 @@ when isMainModule:
         let message = received.get()
         if message.kind == TextMessage:
           let decision = parseJson(message.data)
+          if decision{"type"}.getStr() == "final":
+            echo "knights-archers player: episode ", decision{"status"}.getStr()
+            quit(0)
           if decision{"type"}.getStr() == "decision":
             let selection = promptSelection(decision["prompt_configuration"])
             if episodeSelection.isSome:

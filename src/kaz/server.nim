@@ -2398,6 +2398,14 @@ proc runServerLoop*(
         else:
           capture.get().finishMatch(sim)
         capture.get().trajectory.writeEventsToUri(trajectoryUri)
+      # Players share the terminal state before publishing the results to the runner.
+      let terminalFrame = $(%*{"type": "final",
+        "status": (if abortedUnscored: "unscored" else: "complete")})
+      for socket in sockets:
+        try:
+          socket.send(terminalFrame)
+        except CatchableError:
+          discard
       if not abortedUnscored:
         if runtimeConfig.resultsUri.len > 0:
           let scoresJson = sim.playerResultsJson() & "\n"

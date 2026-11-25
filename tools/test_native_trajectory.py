@@ -235,6 +235,8 @@ for flow in selected_flows:
                 results_doc = json.loads((output / "results.json").read_text())
                 assert results_doc["reason"] == "complete" and len(results_doc["scores"]) == 4
                 assert sum(results_doc["llmTurns"]) >= 4
+                for player in processes[1:]:
+                    assert player.wait(timeout=10) == 0, "player did not honor the terminal frame"
                 assert episode["status"] == "completed" and episode["outcome"]["reason"] == "complete"
                 assert len(decisions) == 8
             assert episode["game_version"] == "fixture-package-0.1.4"
