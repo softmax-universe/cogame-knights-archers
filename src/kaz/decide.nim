@@ -29,12 +29,40 @@ export prompts
 const
   FailureKindInfra* = "infrastructure"
   FailureKindInvalidAction* = "invalid_action"
+  PlayerFailureKindError* = "player_error"
+  PlayerFailureKindInconclusive* = "episode_inconclusive"
+  MaxPlayerFailureMessageRunes* = 2000
 
 proc failureKindFor*(cause: string): string =
   if cause in ["no_credentials", "throttled", "transport_error", "timeout", "budget_guard"]:
     FailureKindInfra
   else:
     FailureKindInvalidAction
+
+proc playerFailureKindFor*(failureKind: string): string =
+  ## Maps internal failure categories to Coworld's closed GamePlayerFailure.kind.
+  if failureKind == FailureKindInfra:
+    PlayerFailureKindInconclusive
+  else:
+    PlayerFailureKindError
+
+proc playerFailurePayload*(
+  slot: int, message: string, kind = PlayerFailureKindError
+): JsonNode =
+  ## Builds Coworld's closed GamePlayerFailure JSON object:
+  ## ONLY `failed_policy_index` (>= 0), `message` (1..2000 runes), and
+  ## `kind` ("player_error" | "episode_inconclusive").
+  if slot < 0:
+    raise newException(ValueError, "failed_policy_index must be nonnegative")
+  if kind notin [PlayerFailureKindError, PlayerFailureKindInconclusive]:
+    raise newException(ValueError, "invalid player failure kind: " & kind)
+  let bounded = message.truncateRunes(MaxPlayerFailureMessageRunes)
+  let cleanMessage = if bounded.len > 0: bounded else: kind
+  %*{
+    "failed_policy_index": slot,
+    "message": cleanMessage,
+    "kind": kind
+  }
 
 type
   TurnDecision* = object
