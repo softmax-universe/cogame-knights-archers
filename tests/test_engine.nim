@@ -96,7 +96,7 @@ block invalidActionsRetryExactlyOnce:
     check(engine.directives[seat].source == dsLlm,
       "the second accepted action drives each hero")
 
-block missingActionsHaveOneSharedDeadlineAndFallback:
+block missingActionsHaveOneSharedDeadlineAndNoFallback:
   var world = llmWorld()
   var engine = initDecisionEngine(world, PromptSelection())
   engine.seatEveryoneLlm()
@@ -112,9 +112,12 @@ block missingActionsHaveOneSharedDeadlineAndFallback:
   check(deadlines == @[world.config.attempt1Ms, world.config.retryMs],
     "the two batch deadlines preserve exact millisecond budgets")
   for seat in 0 ..< world.seatCount():
-    check(engine.haveDirective[seat], "a missing action leaves no hero idle")
-    check(engine.directives[seat].source == dsFallback,
-      "missing player actions use the phalanx fallback")
+    check(not engine.haveDirective[seat],
+      "a missing action must not silently install a phalanx fallback")
+    check(engine.decisions[seat].status == asMissing,
+      "timed-out turn records missing status")
+    check(engine.decisions[seat].executedAction.kind == JNull,
+      "timed-out turn executes no directive")
   for decision in engine.decisions:
     for attempt in decision.attempts:
       check(attempt.origin == aoUnknown and attempt.prompt.kind == JNull,
@@ -123,9 +126,9 @@ block missingActionsHaveOneSharedDeadlineAndFallback:
   for record in records:
     if parseJson(record){"cause"}.getStr() == "timeout":
       inc timeouts
-  check(timeouts == 12, "both attempts and terminal fallbacks name every seat timeout")
+  check(timeouts == 12, "both attempts and terminal records name every seat timeout")
 
-block aCredentialFreePlayerReportsFallbackImmediately:
+block aCredentialFreePlayerReportsFailureImmediately:
   var world = llmWorld()
   var engine = initDecisionEngine(world, PromptSelection())
   engine.seatEveryoneLlm()
@@ -143,15 +146,19 @@ block aCredentialFreePlayerReportsFallbackImmediately:
         "cause": "no_credentials"
       }
   let records = engine.turn(world, 0, 24, 0, exchange)
-  check(batches == 1, "explicit no-credential fallback does not retry")
+  check(batches == 1, "explicit no-credential failure does not retry")
   var noCredentials = 0
   for record in records:
     if parseJson(record){"cause"}.getStr() == "no_credentials":
       inc noCredentials
-  check(noCredentials == 4, "each credential-free seat records a fallback")
+  check(noCredentials == 4, "each credential-free seat records a failure")
   for seat in 0 ..< world.seatCount():
-    check(engine.directives[seat].source == dsFallback,
-      "credential-free seats play phalanx")
+    check(not engine.haveDirective[seat],
+      "credential-free seats must not silently play phalanx")
+    check(engine.decisions[seat].status == asMissing,
+      "credential-free seat records missing status")
+    check(engine.decisions[seat].executedAction.kind == JNull,
+      "credential-free seat executes no directive")
 
 block theBudgetGuardSettlesEarlyRatherThanOverrunning:
   var world = llmWorld()
@@ -172,7 +179,12 @@ block theBudgetGuardSettlesEarlyRatherThanOverrunning:
       guarded = true
   check(guarded, "the guard must name the turn it fired on")
   for seat in 0 ..< world.seatCount():
-    check(engine.haveDirective[seat], "budget guard leaves no hero idle")
+    check(not engine.haveDirective[seat],
+      "budget guard must not silently substitute phalanx for model seats")
+    check(engine.decisions[seat].status == asMissing,
+      "budget-guarded model seat records missing status")
+    check(engine.decisions[seat].executedAction.kind == JNull,
+      "budget-guarded model seat executes no directive")
 
 block theShippedVariantsPaceThemselvesInsideTheBudget:
   let manifest = parseJson(readFile("coworld_manifest_template.json"))
@@ -230,12 +242,40 @@ block modelResponseMustMatchExecutedProposal:
       reply["training_attempt"] = attemptEvidenceJson(evidence)
       result[position] = $reply
   discard engine.turn(world, 0, 24, 0, exchange)
-  for decision in engine.decisions:
-    check(decision.status == asFallback, "model/action mismatch executes a fallback")
+  for seat, decision in engine.decisions:
+    check(not engine.haveDirective[seat], "model/action mismatch installs no directive")
+    check(decision.status == asRejected, "model/action mismatch records rejected status")
+    check(decision.executedAction.kind == JNull, "rejected turn executes no directive")
     check(decision.attempts.len == 2, "all mismatched attempts are retained")
     for attempt in decision.attempts:
       check(not attempt.accepted, "mismatched model response cannot become a target")
-      check(attempt.parsedAction != decision.executedAction, "independent proposal remains distinct from engine fallback")
+      check(attempt.parsedAction != decision.executedAction, "independent proposal remains distinct from empty execution")
+
+block fencedModelResponseAcceptedAndProseRejected:
+  var world = llmWorld()
+  var engine = initDecisionEngine(world, PromptSelection())
+  engine.seatEveryoneLlm()
+  let exchange: DecisionExchange = proc(requests: seq[JsonNode], timeoutMs: int): seq[string] =
+    result = newSeq[string](requests.len)
+    for position, request in requests:
+      var reply = parseJson(validReply(request))
+      var evidence = newDecisionAttempt("player", "model-fixture", aoModel)
+      let rawAction = $reply["action"]
+      if request["slot"].getInt() == 0:
+        evidence.response = %("```json\n" & rawAction & "\n```")
+      else:
+        evidence.response = %("Here is my order:\n" & rawAction)
+      evidence.rawResponse = evidence.response
+      reply["training_attempt"] = attemptEvidenceJson(evidence)
+      result[position] = $reply
+  discard engine.turn(world, 0, 24, 0, exchange)
+  check(engine.haveDirective[0] and engine.decisions[0].status == asAccepted,
+    "single outer json fence is accepted")
+  for seat in 1 ..< world.seatCount():
+    check(not engine.haveDirective[seat] and engine.decisions[seat].status == asRejected,
+      "surrounding prose is rejected without phalanx fallback")
+    check(engine.decisions[seat].executedAction.kind == JNull,
+      "rejected prose executes no directive")
 
 block aScriptedTeacherDoesNotClaimModelInference:
   var world = llmWorld()

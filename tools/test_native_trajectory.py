@@ -268,10 +268,21 @@ for flow in selected_flows:
                 "private-malformed-provider",
             ):
                 assert secret not in public
-            if flow in {"invalid", "malformed-200", "timeout", "malformed-wire"}:
-                assert any(d["action_status"] == "fallback" and len(d["attempts"]) == 2 for d in decisions)
+            if flow in {"invalid", "malformed-200", "malformed-wire"}:
+                assert any(
+                    d["action_status"] == "rejected" and d["executed_action"] is None and len(d["attempts"]) == 2
+                    for d in decisions
+                )
+            if flow == "timeout":
+                assert any(
+                    d["action_status"] == "missing" and d["executed_action"] is None and len(d["attempts"]) == 2
+                    for d in decisions
+                )
             if flow == "provider-error":
-                assert any(d["action_status"] == "fallback" and len(d["attempts"]) == 1 for d in decisions)
+                assert any(
+                    d["action_status"] == "rejected" and d["executed_action"] is None and len(d["attempts"]) == 1
+                    for d in decisions
+                )
             if flow == "malformed-wire":
                 assert all(
                     a["origin"] == "model" and a["platform_call_id"] is not None

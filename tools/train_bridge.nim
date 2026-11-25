@@ -215,9 +215,8 @@ when isMainModule:
         let json = jsonProposal(request["response"].getStr())
         var parsed: DirectiveProposal
         if json.ok:
-          let gate = gateCentre(game)
           parsed = parseSquadDirective(json.node, @[game.cogAlias(seat)], @[seat],
-            gate.x, gate.y, MapWidth - 1, MapHeight - 1)
+            MapWidth - 1, MapHeight - 1)
         if not json.ok or not parsed.ok:
           inc rejected
           if rejected < 2:
@@ -230,28 +229,26 @@ when isMainModule:
             doAssert dup2(2, 1) >= 0
             continue
           consumed = true
-          directive = scriptedDirective(views[seat].policyView(), blPhalanx)
-          directive.source = dsFallback
+          engine.haveDirective[seat] = false
+          candidate = newJNull()
         else:
           directive = parsed.directive
-          let proposal = directive.actionJson()
-          engine.repairMissingOrders(game, seat, directive)
-          if directive.actionJson() != proposal:
-            consumed = true
-            directive.source = dsFallback
-        candidate = directive.actionJson()
+          candidate = directive.actionJson()
+          doAssert directive.orders.len == 1
+          orders[seat] = directive.orders[0]
+          engine.directives[seat] = directive
+          engine.haveDirective[seat] = true
       else:
         candidate = parseJson(request["response"].getStr())
         for head in heads(): doAssert candidate[head["name"].getStr()] in head["choices"]
-        let gate = gateCentre(game)
         let parsed = parseSquadDirective(candidate.hostedDirective(game.cogAlias(seat)),
-          @[game.cogAlias(seat)], @[seat], gate.x, gate.y, MapWidth - 1, MapHeight - 1)
+          @[game.cogAlias(seat)], @[seat], MapWidth - 1, MapHeight - 1)
         doAssert parsed.ok
         directive = parsed.directive
-      doAssert directive.orders.len == 1
-      orders[seat] = directive.orders[0]
-      engine.directives[seat] = directive
-      engine.haveDirective[seat] = true
+        doAssert directive.orders.len == 1
+        orders[seat] = directive.orders[0]
+        engine.directives[seat] = directive
+        engine.haveDirective[seat] = true
       rejected = 0
       inc id
       inc seat
@@ -259,15 +256,18 @@ when isMainModule:
       if seat < 4:
         observation = views[seat].decision(seat, id, language, operatorPrompt, selection)
       else:
-        for issued in engine.directives:
+        for actor, issued in engine.directives:
+          if not engine.haveDirective[actor]: continue
           for order in issued.orders:
             if order.say.len > 0: discard game.applyShout(order.cogIndex, order.say)
         while game.phase == Playing:
           engine.ctl.observeHeroes(game)
           var inputs = newSeq[InputState](game.players.len)
           for actor in 0 ..< game.players.len:
-            inputs[actor] = decodeInputMask(engine.ctl.compileMask(
-              game, orders[game.cogSeat(actor)], actor))
+            let owner = game.cogSeat(actor)
+            if engine.haveDirective[owner]:
+              inputs[actor] = decodeInputMask(engine.ctl.compileMask(
+                game, orders[owner], actor))
           game.step(inputs, prev)
           prev = inputs
           if game.phase == Playing and game.gameTicksElapsed() mod game.config.turnTicks == 0:

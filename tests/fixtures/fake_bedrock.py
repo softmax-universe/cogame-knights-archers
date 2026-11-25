@@ -27,7 +27,7 @@ START = time.monotonic()
 
 REPLY = {
     "note": "hold the gate, I take the north lane",
-    "cogs": [{"intent": "screen", "target": [820, 300],
+    "cogs": [{"id": "KNIGHT-alpha", "intent": "screen", "target": [820, 300],
               "face": [900, 290], "say": "north"}],
 }
 

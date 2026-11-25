@@ -2122,6 +2122,8 @@ proc runServerLoop*(
           replayWriter.writeChat(tickTime(sim.tickCount), 0, record)
         for seat in 0 ..< engine.directives.len:
           if not engine.haveDirective[seat]:
+            if engine.seats[seat].isLlm:
+              inc sim.fallbackTurns[min(seat, sim.fallbackTurns.high)]
             continue
           let directive = engine.directives[seat]
           case directive.source
@@ -2159,14 +2161,10 @@ proc runServerLoop*(
               found = true
               break
         if not found:
-          # This hero's seat has no directive yet (turn 0, or a seat that has
-          # not registered). It plays the published `phalanx` baseline, which
-          # is what "adapt to a partner you know the rules of" means here.
-          let scripted = engine.phalanxFor(sim, @[cogIndex])
-          if scripted.orders.len > 0:
-            order = scripted.orders[0]
-            found = true
-        if not found:
+          # No directive installed for this hero on this turn (e.g. a rejected
+          # or missing model reply): keep inputs zero (idle) and record mask 0.
+          replayWriter.writeInputMaskChange(
+            tickTime(sim.tickCount), cogIndex, 0)
           continue
         let mask = engine.ctl.compileMask(sim, order, cogIndex)
         inputs[cogIndex] = decodeInputMask(mask)

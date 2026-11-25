@@ -29,21 +29,22 @@ Claude. No seat sees another's current-turn order or operator prompt.
            "face": [900, 290], "say": "north"}]}
 ```
 
-| field | cap | repair |
+| field | cap / rule | default / bounds |
 |---|---|---|
-| `note` | ≤ 160 runes | truncated on a rune boundary; newlines collapse |
-| `cogs` | exactly 1 entry — your own hero | extras dropped; empty keeps last turn's order |
-| `cogs[].id` | your own alias, ≤ 16 runes | an unmatched entry is assigned by position |
-| `cogs[].intent` | one of `intercept` `hold` `screen` `focus` `fall_back` `regroup` | → `intercept` |
-| `cogs[].target` | `[x, y]` | clamped to the map; missing → the gate centre |
-| `cogs[].face` | `[x, y]` or null | clamped; missing → the controller aims |
-| `cogs[].say` | ≤ 10 runes | truncated, then printable-ASCII filtered. It is a REAL in-game shout every hero within 247 px hears. |
+| `note` | optional string, ≤ 160 runes | defaults to `""`; truncated on a rune boundary; newlines collapse |
+| `cogs` | required array with exactly 1 entry — your own hero | wrong length or non-array is rejected |
+| `cogs[].id` | required exact match to your own alias | wrong or missing id is rejected |
+| `cogs[].intent` | required; exact one of `intercept` `hold` `screen` `focus` `fall_back` `regroup` | unknown or non-exact intent is rejected |
+| `cogs[].target` | required `[x, y]` pair of finite JSON numbers | clamped to the map box; missing or malformed is rejected |
+| `cogs[].face` | optional `[x, y]` pair of finite JSON numbers, or `null` | defaults to `null` (controller aims); clamped to the map box; malformed is rejected |
+| `cogs[].say` | optional string, ≤ 10 runes | defaults to `""`; truncated, then printable-ASCII filtered. It is a REAL in-game shout every hero within 247 px hears. |
 
-Parsing is tolerant: markdown fences, prose before the object, `cogs` as an
-id-keyed object, a bare order with no `cogs` wrapper, numeric strings and
-hyphenated intents are all accepted. Two consecutive unusable replies and the
-seat plays the `phalanx` directive for that turn, with a `fallback` record in
-the replay naming the cause.
+Parsing is strict: reply with exactly one JSON object, either bare or inside a
+single outer Markdown code fence (` ``` ` or ` ```json `). Surrounding prose,
+extra JSON objects, legacy wrapper shapes, unknown fields, and invalid field
+values are rejected. Missing or rejected replies get one retry; after a second
+failure the seat receives no directive for that turn (its hero stands idle) and
+a `fallback` record in the replay names the cause.
 
 ## What actually wins
 

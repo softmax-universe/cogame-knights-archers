@@ -121,8 +121,7 @@ def play_language(binary: Path, variant: str) -> None:
         assert rejected["kind"] == "rejected" and rejected["observation"] == initial
         consumed = request({"kind": "step", "decision_id": initial["decision_id"], "response": "{}"})
         assert consumed["kind"] == "consumed_rejection"
-        assert len(consumed["action"]["cogs"]) == 1
-        assert consumed["action"]["cogs"][0]["id"] == initial["semantic_view"]["you"]["id"]
+        assert consumed["action"] is None
         observation = consumed["observation"]
         decisions = 1
         while observation["kind"] == "decision":
